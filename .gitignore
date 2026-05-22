@@ -1,0 +1,10 @@
+build/
+*.o
+*.d
+*.lst
+*.elf
+*.bin
+*.hex
+*.map
+*.log
+*:Zone.Identifier
