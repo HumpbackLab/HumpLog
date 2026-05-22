@@ -75,6 +75,7 @@ ASMM_SOURCES =
 # binaries
 #######################################
 PREFIX = arm-none-eabi-
+HOST_CC ?= gcc
 # The gcc compiler bin path can be either defined in make command via GCC_PATH variable (> make GCC_PATH=xxx)
 # either it can be added to the PATH environment variable.
 ifdef GCC_PATH
@@ -194,6 +195,12 @@ $(BUILD_DIR):
 #######################################
 clean:
 	-rm -fR $(BUILD_DIR)
+
+host-test: tests/openlog_fs_test
+	./tests/openlog_fs_test
+
+tests/openlog_fs_test: tests/openlog_fs_test.c project/src/openlog_fs.c project/inc/openlog_fs.h
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -Iproject/inc tests/openlog_fs_test.c project/src/openlog_fs.c -o $@
   
 #######################################
 # dependencies

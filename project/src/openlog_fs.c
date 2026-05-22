@@ -334,7 +334,12 @@ int8_t openlog_fs_write(uint8_t node_id, uint16_t offset, const uint8_t *data, u
   uint16_t end_offset;
   uint8_t slot;
 
-  if(!openlog_fs_node_valid(node_id) || g_nodes[node_id].is_dir != 0U || data == NULL)
+  if(!openlog_fs_node_valid(node_id) || g_nodes[node_id].is_dir != 0U)
+  {
+    return -1;
+  }
+
+  if(length != 0U && data == NULL)
   {
     return -1;
   }
@@ -352,7 +357,10 @@ int8_t openlog_fs_write(uint8_t node_id, uint16_t offset, const uint8_t *data, u
            (size_t)(offset - g_nodes[node_id].size));
   }
 
-  memcpy(&g_file_storage[slot][offset], data, length);
+  if(length != 0U)
+  {
+    memcpy(&g_file_storage[slot][offset], data, length);
+  }
   if(end_offset > g_nodes[node_id].size)
   {
     g_nodes[node_id].size = end_offset;

@@ -8,3 +8,4 @@ build/
 *.map
 *.log
 *:Zone.Identifier
+tests/openlog_fs_test
