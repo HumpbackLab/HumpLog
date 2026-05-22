@@ -26,6 +26,7 @@
 
 /* includes ------------------------------------------------------------------*/
 #include "at32f421_int.h"
+#include "wk_usart.h"
 /* private includes ----------------------------------------------------------*/
 /* add user code begin private includes */
 
@@ -219,6 +220,15 @@ void SysTick_Handler(void)
   /* add user code begin SysTick_IRQ 1 */
 
   /* add user code end SysTick_IRQ 1 */
+}
+
+void DMA1_Channel3_2_IRQHandler(void)
+{
+}
+
+void DMA1_Channel5_4_IRQHandler(void)
+{
+  wk_usart1_dma_irq_handler();
 }
 
 /* add user code begin 1 */

@@ -60,6 +60,16 @@ extern "C" {
   /* init usart1 function. */
   void wk_usart1_init(void);
 
+  uint8_t wk_usart1_readable(void);
+  uint8_t wk_usart1_read_byte(void);
+  void wk_usart1_write_byte(uint8_t byte);
+  void wk_usart1_write_buffer(const uint8_t *data, uint32_t length);
+  void wk_usart1_write_string(const char *text);
+  void wk_usart1_flush(void);
+  void wk_usart1_dma_suspend(void);
+  void wk_usart1_dma_resume(void);
+  void wk_usart1_dma_irq_handler(void);
+
 /* add user code begin exported functions */
 
 /* add user code end exported functions */

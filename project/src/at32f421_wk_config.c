@@ -153,6 +153,12 @@ void wk_periph_clock_config(void)
   /* enable gpiob periph clock */
   crm_periph_clock_enable(CRM_GPIOB_PERIPH_CLOCK, TRUE);
 
+  /* enable dma1 periph clock */
+  crm_periph_clock_enable(CRM_DMA1_PERIPH_CLOCK, TRUE);
+
+  /* enable system config periph clock */
+  crm_periph_clock_enable(CRM_SCFG_PERIPH_CLOCK, TRUE);
+
   /* enable spi1 periph clock */
   crm_periph_clock_enable(CRM_SPI1_PERIPH_CLOCK, TRUE);
 
@@ -179,6 +185,10 @@ void wk_nvic_config(void)
   NVIC_SetPriority(DebugMonitor_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));
   NVIC_SetPriority(PendSV_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));
   NVIC_SetPriority(SysTick_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 15, 0));
+  NVIC_SetPriority(DMA1_Channel3_2_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 3, 0));
+  NVIC_SetPriority(DMA1_Channel5_4_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 3, 1));
+  NVIC_EnableIRQ(DMA1_Channel3_2_IRQn);
+  NVIC_EnableIRQ(DMA1_Channel5_4_IRQn);
 }
 
 /* add user code begin 1 */

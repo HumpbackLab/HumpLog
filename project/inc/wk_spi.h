@@ -63,6 +63,9 @@ extern "C" {
   /* init spi2 function. */
   void wk_spi2_init(void);
 
+  uint8_t wk_spi1_transfer_dma(const uint8_t *tx_data, uint8_t *rx_data, uint16_t length);
+  uint8_t wk_spi2_transfer_dma(const uint8_t *tx_data, uint8_t *rx_data, uint16_t length);
+
 /* add user code begin exported functions */
 
 /* add user code end exported functions */

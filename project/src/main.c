@@ -26,6 +26,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "at32f421_wk_config.h"
+#include "openlog.h"
 #include "wk_spi.h"
 #include "wk_usart.h"
 #include "wk_system.h"
@@ -101,11 +102,15 @@ int main(void)
 
   /* add user code begin 2 */
 
+  openlog_init();
+
   /* add user code end 2 */
 
   while(1)
   {
     /* add user code begin 3 */
+
+    openlog_process();
 
     /* add user code end 3 */
   }

@@ -26,6 +26,23 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "wk_spi.h"
+#include "wk_usart.h"
+
+static uint8_t g_wk_spi_dma_dummy_tx = 0xFFU;
+static uint8_t g_wk_spi_dma_dummy_rx;
+
+static uint8_t wk_spi_transfer_dma_internal(spi_type *spi_x,
+                                            dma_channel_type *rx_channel,
+                                            dma_channel_type *tx_channel,
+                                            uint32_t rx_flag,
+                                            uint32_t tx_flag,
+                                            const uint8_t *tx_data,
+                                            uint8_t *rx_data,
+                                            uint16_t length);
+static uint8_t wk_spi_transfer_blocking_internal(spi_type *spi_x,
+                                                 const uint8_t *tx_data,
+                                                 uint8_t *rx_data,
+                                                 uint16_t length);
 
 /* add user code begin 0 */
 
@@ -193,6 +210,125 @@ void wk_spi2_init(void)
   /* add user code begin spi2_init 3 */
 
   /* add user code end spi2_init 3 */
+}
+
+static uint8_t wk_spi_transfer_dma_internal(spi_type *spi_x,
+                                            dma_channel_type *rx_channel,
+                                            dma_channel_type *tx_channel,
+                                            uint32_t rx_flag,
+                                            uint32_t tx_flag,
+                                            const uint8_t *tx_data,
+                                            uint8_t *rx_data,
+                                            uint16_t length)
+{
+  dma_init_type dma_init_struct;
+
+  if(length == 0U)
+  {
+    return 1U;
+  }
+
+  dma_channel_enable(rx_channel, FALSE);
+  dma_channel_enable(tx_channel, FALSE);
+  dma_reset(rx_channel);
+  dma_reset(tx_channel);
+  dma_flag_clear(rx_flag | tx_flag);
+
+  dma_default_para_init(&dma_init_struct);
+  dma_init_struct.peripheral_base_addr = (uint32_t)&spi_x->dt;
+  dma_init_struct.memory_base_addr = rx_data != NULL ? (uint32_t)rx_data : (uint32_t)&g_wk_spi_dma_dummy_rx;
+  dma_init_struct.direction = DMA_DIR_PERIPHERAL_TO_MEMORY;
+  dma_init_struct.buffer_size = length;
+  dma_init_struct.peripheral_inc_enable = FALSE;
+  dma_init_struct.memory_inc_enable = rx_data != NULL ? TRUE : FALSE;
+  dma_init_struct.peripheral_data_width = DMA_PERIPHERAL_DATA_WIDTH_BYTE;
+  dma_init_struct.memory_data_width = DMA_MEMORY_DATA_WIDTH_BYTE;
+  dma_init_struct.loop_mode_enable = FALSE;
+  dma_init_struct.priority = DMA_PRIORITY_VERY_HIGH;
+  dma_init(rx_channel, &dma_init_struct);
+
+  dma_default_para_init(&dma_init_struct);
+  dma_init_struct.peripheral_base_addr = (uint32_t)&spi_x->dt;
+  dma_init_struct.memory_base_addr = tx_data != NULL ? (uint32_t)tx_data : (uint32_t)&g_wk_spi_dma_dummy_tx;
+  dma_init_struct.direction = DMA_DIR_MEMORY_TO_PERIPHERAL;
+  dma_init_struct.buffer_size = length;
+  dma_init_struct.peripheral_inc_enable = FALSE;
+  dma_init_struct.memory_inc_enable = tx_data != NULL ? TRUE : FALSE;
+  dma_init_struct.peripheral_data_width = DMA_PERIPHERAL_DATA_WIDTH_BYTE;
+  dma_init_struct.memory_data_width = DMA_MEMORY_DATA_WIDTH_BYTE;
+  dma_init_struct.loop_mode_enable = FALSE;
+  dma_init_struct.priority = DMA_PRIORITY_VERY_HIGH;
+  dma_init(tx_channel, &dma_init_struct);
+
+  spi_i2s_dma_receiver_enable(spi_x, TRUE);
+  spi_i2s_dma_transmitter_enable(spi_x, TRUE);
+  dma_channel_enable(rx_channel, TRUE);
+  dma_channel_enable(tx_channel, TRUE);
+
+  while(dma_flag_get(rx_flag) == RESET || dma_flag_get(tx_flag) == RESET)
+  {
+  }
+
+  dma_channel_enable(rx_channel, FALSE);
+  dma_channel_enable(tx_channel, FALSE);
+  spi_i2s_dma_receiver_enable(spi_x, FALSE);
+  spi_i2s_dma_transmitter_enable(spi_x, FALSE);
+  dma_flag_clear(rx_flag | tx_flag);
+
+  while(spi_i2s_flag_get(spi_x, SPI_I2S_BF_FLAG) != RESET)
+  {
+  }
+
+  return 1U;
+}
+
+uint8_t wk_spi1_transfer_dma(const uint8_t *tx_data, uint8_t *rx_data, uint16_t length)
+{
+  return wk_spi_transfer_dma_internal(SPI1,
+                                      DMA1_CHANNEL2,
+                                      DMA1_CHANNEL3,
+                                      DMA1_GL2_FLAG,
+                                      DMA1_GL3_FLAG,
+                                      tx_data,
+                                      rx_data,
+                                      length);
+}
+
+uint8_t wk_spi2_transfer_dma(const uint8_t *tx_data, uint8_t *rx_data, uint16_t length)
+{
+  return wk_spi_transfer_blocking_internal(SPI2, tx_data, rx_data, length);
+}
+
+static uint8_t wk_spi_transfer_blocking_internal(spi_type *spi_x,
+                                                 const uint8_t *tx_data,
+                                                 uint8_t *rx_data,
+                                                 uint16_t length)
+{
+  uint16_t index;
+  uint8_t tx_value;
+
+  for(index = 0U; index < length; ++index)
+  {
+    tx_value = tx_data != NULL ? tx_data[index] : g_wk_spi_dma_dummy_tx;
+    while(spi_i2s_flag_get(spi_x, SPI_I2S_TDBE_FLAG) == RESET)
+    {
+    }
+    spi_i2s_data_transmit(spi_x, tx_value);
+    while(spi_i2s_flag_get(spi_x, SPI_I2S_RDBF_FLAG) == RESET)
+    {
+    }
+    tx_value = (uint8_t)spi_i2s_data_receive(spi_x);
+    if(rx_data != NULL)
+    {
+      rx_data[index] = tx_value;
+    }
+  }
+
+  while(spi_i2s_flag_get(spi_x, SPI_I2S_BF_FLAG) != RESET)
+  {
+  }
+
+  return 1U;
 }
 
 /* add user code begin 1 */

@@ -33,6 +33,8 @@ BUILD_DIR = build
 # C sources
 C_SOURCES = \
 project/src/main.c \
+project/src/openlog.c \
+project/src/openlog_fs.c \
 project/src/syscalls.c \
 project/src/sysmem.c \
 project/src/at32f421_wk_config.c \

@@ -26,6 +26,25 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "wk_usart.h"
+#include <stddef.h>
+
+#define WK_USART1_RX_DMA_BUFFER_SIZE 256U
+#define WK_USART1_TX_DMA_BUFFER_SIZE 512U
+
+static volatile uint8_t g_wk_usart1_rx_dma_buffer[WK_USART1_RX_DMA_BUFFER_SIZE];
+static volatile uint16_t g_wk_usart1_rx_read_index;
+static volatile uint8_t g_wk_usart1_tx_dma_buffer[WK_USART1_TX_DMA_BUFFER_SIZE];
+static volatile uint16_t g_wk_usart1_tx_read_index;
+static volatile uint16_t g_wk_usart1_tx_write_index;
+static volatile uint16_t g_wk_usart1_tx_dma_length;
+static volatile uint8_t g_wk_usart1_tx_dma_busy;
+static volatile uint8_t g_wk_usart1_dma_suspended;
+
+static void wk_usart1_rx_dma_config(void);
+static void wk_usart1_tx_dma_channel_reset(void);
+static void wk_usart1_tx_kick_locked(void);
+static uint16_t wk_usart1_rx_dma_write_index_get(void);
+static uint16_t wk_usart1_tx_free_space_get(void);
 
 /* add user code begin 0 */
 
@@ -75,15 +94,235 @@ void wk_usart1_init(void)
 
   usart_hardware_flow_control_set(USART1, USART_HARDWARE_FLOW_NONE);
 
+  scfg_usart1_tx_dma_channel_remap(SCFG_USART1_TX_TO_DMA_CHANNEL_4);
+  scfg_usart1_rx_dma_channel_remap(SCFG_USART1_RX_TO_DMA_CHANNEL_5);
+
   /* add user code begin usart1_init 2 */
 
   /* add user code end usart1_init 2 */
   
   usart_enable(USART1, TRUE);
+  wk_usart1_rx_dma_config();
+  wk_usart1_tx_dma_channel_reset();
+  usart_dma_receiver_enable(USART1, TRUE);
 
   /* add user code begin usart1_init 3 */
 
   /* add user code end usart1_init 3 */
+}
+
+static void wk_usart1_rx_dma_config(void)
+{
+  dma_init_type dma_init_struct;
+
+  dma_reset(DMA1_CHANNEL5);
+  dma_default_para_init(&dma_init_struct);
+  dma_init_struct.peripheral_base_addr = (uint32_t)&USART1->dt;
+  dma_init_struct.memory_base_addr = (uint32_t)g_wk_usart1_rx_dma_buffer;
+  dma_init_struct.direction = DMA_DIR_PERIPHERAL_TO_MEMORY;
+  dma_init_struct.buffer_size = WK_USART1_RX_DMA_BUFFER_SIZE;
+  dma_init_struct.peripheral_inc_enable = FALSE;
+  dma_init_struct.memory_inc_enable = TRUE;
+  dma_init_struct.peripheral_data_width = DMA_PERIPHERAL_DATA_WIDTH_BYTE;
+  dma_init_struct.memory_data_width = DMA_MEMORY_DATA_WIDTH_BYTE;
+  dma_init_struct.loop_mode_enable = TRUE;
+  dma_init_struct.priority = DMA_PRIORITY_HIGH;
+  dma_init(DMA1_CHANNEL5, &dma_init_struct);
+  dma_channel_enable(DMA1_CHANNEL5, TRUE);
+}
+
+static void wk_usart1_tx_dma_channel_reset(void)
+{
+  dma_reset(DMA1_CHANNEL4);
+  dma_flag_clear(DMA1_GL4_FLAG);
+  dma_interrupt_enable(DMA1_CHANNEL4, DMA_FDT_INT | DMA_DTERR_INT, TRUE);
+}
+
+static uint16_t wk_usart1_rx_dma_write_index_get(void)
+{
+  return (uint16_t)(WK_USART1_RX_DMA_BUFFER_SIZE - dma_data_number_get(DMA1_CHANNEL5)) %
+         WK_USART1_RX_DMA_BUFFER_SIZE;
+}
+
+static uint16_t wk_usart1_tx_free_space_get(void)
+{
+  uint16_t read_index;
+  uint16_t write_index;
+
+  read_index = g_wk_usart1_tx_read_index;
+  write_index = g_wk_usart1_tx_write_index;
+  if(write_index >= read_index)
+  {
+    return (uint16_t)(WK_USART1_TX_DMA_BUFFER_SIZE - (write_index - read_index) - 1U);
+  }
+
+  return (uint16_t)(read_index - write_index - 1U);
+}
+
+static void wk_usart1_tx_kick_locked(void)
+{
+  dma_init_type dma_init_struct;
+  uint16_t transfer_length;
+
+  if(g_wk_usart1_dma_suspended != 0U || g_wk_usart1_tx_dma_busy != 0U)
+  {
+    return;
+  }
+
+  if(g_wk_usart1_tx_read_index == g_wk_usart1_tx_write_index)
+  {
+    return;
+  }
+
+  if(g_wk_usart1_tx_write_index > g_wk_usart1_tx_read_index)
+  {
+    transfer_length = (uint16_t)(g_wk_usart1_tx_write_index - g_wk_usart1_tx_read_index);
+  }
+  else
+  {
+    transfer_length = (uint16_t)(WK_USART1_TX_DMA_BUFFER_SIZE - g_wk_usart1_tx_read_index);
+  }
+
+  dma_channel_enable(DMA1_CHANNEL4, FALSE);
+  dma_flag_clear(DMA1_GL4_FLAG);
+  dma_default_para_init(&dma_init_struct);
+  dma_init_struct.peripheral_base_addr = (uint32_t)&USART1->dt;
+  dma_init_struct.memory_base_addr = (uint32_t)&g_wk_usart1_tx_dma_buffer[g_wk_usart1_tx_read_index];
+  dma_init_struct.direction = DMA_DIR_MEMORY_TO_PERIPHERAL;
+  dma_init_struct.buffer_size = transfer_length;
+  dma_init_struct.peripheral_inc_enable = FALSE;
+  dma_init_struct.memory_inc_enable = TRUE;
+  dma_init_struct.peripheral_data_width = DMA_PERIPHERAL_DATA_WIDTH_BYTE;
+  dma_init_struct.memory_data_width = DMA_MEMORY_DATA_WIDTH_BYTE;
+  dma_init_struct.loop_mode_enable = FALSE;
+  dma_init_struct.priority = DMA_PRIORITY_HIGH;
+  dma_init(DMA1_CHANNEL4, &dma_init_struct);
+  dma_interrupt_enable(DMA1_CHANNEL4, DMA_FDT_INT | DMA_DTERR_INT, TRUE);
+  g_wk_usart1_tx_dma_length = transfer_length;
+  g_wk_usart1_tx_dma_busy = 1U;
+  usart_dma_transmitter_enable(USART1, TRUE);
+  dma_channel_enable(DMA1_CHANNEL4, TRUE);
+}
+
+uint8_t wk_usart1_readable(void)
+{
+  return wk_usart1_rx_dma_write_index_get() != g_wk_usart1_rx_read_index ? 1U : 0U;
+}
+
+uint8_t wk_usart1_read_byte(void)
+{
+  uint8_t value;
+
+  while(wk_usart1_readable() == 0U)
+  {
+  }
+
+  value = g_wk_usart1_rx_dma_buffer[g_wk_usart1_rx_read_index];
+  g_wk_usart1_rx_read_index = (uint16_t)((g_wk_usart1_rx_read_index + 1U) % WK_USART1_RX_DMA_BUFFER_SIZE);
+  return value;
+}
+
+void wk_usart1_write_byte(uint8_t byte)
+{
+  while(wk_usart1_tx_free_space_get() == 0U)
+  {
+    wk_usart1_tx_kick_locked();
+  }
+
+  g_wk_usart1_tx_dma_buffer[g_wk_usart1_tx_write_index] = byte;
+  g_wk_usart1_tx_write_index = (uint16_t)((g_wk_usart1_tx_write_index + 1U) % WK_USART1_TX_DMA_BUFFER_SIZE);
+  wk_usart1_tx_kick_locked();
+}
+
+void wk_usart1_write_buffer(const uint8_t *data, uint32_t length)
+{
+  uint32_t index;
+
+  if(data == NULL)
+  {
+    return;
+  }
+
+  for(index = 0; index < length; ++index)
+  {
+    wk_usart1_write_byte(data[index]);
+  }
+}
+
+void wk_usart1_write_string(const char *text)
+{
+  if(text == NULL)
+  {
+    return;
+  }
+
+  while(*text != '\0')
+  {
+    wk_usart1_write_byte((uint8_t)*text);
+    ++text;
+  }
+}
+
+void wk_usart1_flush(void)
+{
+  while(g_wk_usart1_tx_dma_busy != 0U || g_wk_usart1_tx_read_index != g_wk_usart1_tx_write_index)
+  {
+    wk_usart1_tx_kick_locked();
+  }
+}
+
+void wk_usart1_dma_suspend(void)
+{
+  if(g_wk_usart1_dma_suspended != 0U)
+  {
+    return;
+  }
+
+  wk_usart1_flush();
+  g_wk_usart1_dma_suspended = 1U;
+  dma_channel_enable(DMA1_CHANNEL4, FALSE);
+  dma_channel_enable(DMA1_CHANNEL5, FALSE);
+  dma_flag_clear(DMA1_GL4_FLAG | DMA1_GL5_FLAG);
+  usart_dma_transmitter_enable(USART1, FALSE);
+  usart_dma_receiver_enable(USART1, FALSE);
+  g_wk_usart1_tx_dma_busy = 0U;
+  g_wk_usart1_tx_dma_length = 0U;
+}
+
+void wk_usart1_dma_resume(void)
+{
+  if(g_wk_usart1_dma_suspended == 0U)
+  {
+    return;
+  }
+
+  wk_usart1_rx_dma_config();
+  wk_usart1_tx_dma_channel_reset();
+  usart_dma_receiver_enable(USART1, TRUE);
+  g_wk_usart1_dma_suspended = 0U;
+  wk_usart1_tx_kick_locked();
+}
+
+void wk_usart1_dma_irq_handler(void)
+{
+  if(dma_interrupt_flag_get(DMA1_FDT4_FLAG) != RESET)
+  {
+    dma_channel_enable(DMA1_CHANNEL4, FALSE);
+    dma_flag_clear(DMA1_GL4_FLAG);
+    g_wk_usart1_tx_read_index = (uint16_t)((g_wk_usart1_tx_read_index + g_wk_usart1_tx_dma_length) %
+                                           WK_USART1_TX_DMA_BUFFER_SIZE);
+    g_wk_usart1_tx_dma_length = 0U;
+    g_wk_usart1_tx_dma_busy = 0U;
+    wk_usart1_tx_kick_locked();
+  }
+
+  if(dma_interrupt_flag_get(DMA1_DTERR4_FLAG) != RESET)
+  {
+    dma_channel_enable(DMA1_CHANNEL4, FALSE);
+    dma_flag_clear(DMA1_GL4_FLAG);
+    g_wk_usart1_tx_dma_busy = 0U;
+    g_wk_usart1_tx_dma_length = 0U;
+  }
 }
 
 /* add user code begin 1 */
