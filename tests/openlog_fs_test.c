@@ -141,6 +141,47 @@ static void test_limits(void)
   expect_int(openlog_fs_write((uint8_t)file_id, OPENLOG_FS_FILE_CAPACITY, (const uint8_t *)"X", 1U), -1, "write past capacity should fail");
 }
 
+typedef struct
+{
+  uint8_t count;
+  uint8_t saw_file;
+  uint8_t saw_dir;
+} iterate_result_t;
+
+static void iterate_collect(uint8_t node_id, const openlog_fs_node_t *node, void *context)
+{
+  iterate_result_t *result = (iterate_result_t *)context;
+
+  (void)node_id;
+  ++result->count;
+  if(node != NULL)
+  {
+    if(node->is_dir != 0U && strcmp(node->name, "DIR2") == 0)
+    {
+      result->saw_dir = 1U;
+    }
+    if(node->is_dir == 0U && strcmp(node->name, "FILE2.TXT") == 0)
+    {
+      result->saw_file = 1U;
+    }
+  }
+}
+
+static void test_iterate_dir(void)
+{
+  iterate_result_t result;
+
+  openlog_fs_init();
+  expect_true(openlog_fs_create_dir(openlog_fs_root(), "DIR2") >= 0, "iterate dir should create directory");
+  expect_true(openlog_fs_create_file(openlog_fs_root(), "FILE2.TXT", 1U) >= 0, "iterate dir should create file");
+
+  memset(&result, 0, sizeof(result));
+  openlog_fs_iterate_dir(openlog_fs_root(), iterate_collect, &result);
+  expect_int(result.count, 2, "iterate dir should visit each child once");
+  expect_true(result.saw_dir != 0U, "iterate dir should see directory");
+  expect_true(result.saw_file != 0U, "iterate dir should see file");
+}
+
 int main(void)
 {
   test_init_and_root();
@@ -149,6 +190,7 @@ int main(void)
   test_write_append_and_sparse();
   test_truncate_and_delete();
   test_limits();
+  test_iterate_dir();
 
   puts("openlog_fs tests passed");
   return 0;

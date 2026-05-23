@@ -134,6 +134,28 @@ void openlog_fs_refresh_dir(uint8_t parent_id)
   (void)parent_id;
 }
 
+void openlog_fs_iterate_dir(uint8_t parent_id,
+                            openlog_fs_iterate_callback_t callback,
+                            void *context)
+{
+  uint8_t index;
+
+  if(callback == NULL || !openlog_fs_node_valid(parent_id) || g_nodes[parent_id].is_dir == 0U)
+  {
+    return;
+  }
+
+  for(index = 0U; index < OPENLOG_FS_MAX_NODES; ++index)
+  {
+    if(g_nodes[index].used != 0U &&
+       index != parent_id &&
+       g_nodes[index].parent == parent_id)
+    {
+      callback(index, &g_nodes[index], context);
+    }
+  }
+}
+
 int8_t openlog_fs_find_child(uint8_t parent_id, const char *name)
 {
   uint8_t index;
@@ -803,6 +825,66 @@ void openlog_fs_refresh_dir(uint8_t parent_id)
       openlog_fs_invalidate_node(index);
     }
   }
+}
+
+void openlog_fs_iterate_dir(uint8_t parent_id,
+                            openlog_fs_iterate_callback_t callback,
+                            void *context)
+{
+  DIR directory;
+  FILINFO file_info;
+  char fatfs_path[OPENLOG_FS_PATH_LENGTH + 4U];
+  char child_relative_path[OPENLOG_FS_PATH_LENGTH + 1U];
+  openlog_fs_node_t node;
+  int8_t cached_id;
+  uint8_t emitted_id;
+
+  if(callback == NULL || !openlog_fs_node_valid(parent_id) || g_nodes[parent_id].is_dir == 0U)
+  {
+    return;
+  }
+
+  openlog_fs_build_fatfs_path(g_paths[parent_id], fatfs_path, sizeof(fatfs_path));
+  if(f_opendir(&directory, fatfs_path) != FR_OK)
+  {
+    return;
+  }
+
+  for(;;)
+  {
+    if(f_readdir(&directory, &file_info) != FR_OK || file_info.fname[0] == '\0')
+    {
+      break;
+    }
+
+    if(strcmp(file_info.fname, ".") == 0 || strcmp(file_info.fname, "..") == 0)
+    {
+      continue;
+    }
+
+    if(!openlog_fs_build_child_path(parent_id, file_info.fname, child_relative_path, sizeof(child_relative_path)))
+    {
+      continue;
+    }
+
+    memset(&node, 0, sizeof(node));
+    node.used = 1U;
+    node.is_dir = (file_info.fattrib & AM_DIR) != 0U ? 1U : 0U;
+    node.parent = parent_id;
+    node.size = (uint32_t)file_info.fsize;
+    strncpy(node.name, file_info.fname, OPENLOG_FS_NAME_LENGTH);
+    node.name[OPENLOG_FS_NAME_LENGTH] = '\0';
+
+    emitted_id = 0xFFU;
+    cached_id = openlog_fs_find_cached_path(child_relative_path);
+    if(cached_id >= 0)
+    {
+      emitted_id = (uint8_t)cached_id;
+    }
+    callback(emitted_id, &node, context);
+  }
+
+  (void)f_closedir(&directory);
 }
 
 uint8_t openlog_fs_name_valid(const char *name)

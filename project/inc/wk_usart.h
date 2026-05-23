@@ -59,6 +59,7 @@ extern "C" {
 
   /* init usart1 function. */
   void wk_usart1_init(void);
+  void wk_usart1_set_baud(uint32_t baud_rate);
 
   uint8_t wk_usart1_readable(void);
   uint8_t wk_usart1_read_byte(void);

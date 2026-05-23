@@ -17,14 +17,35 @@
 #define OPENLOG_PROMPT_COMMAND ">"
 #define OPENLOG_LINE_BUFFER_SIZE 80U
 #define OPENLOG_WRITE_LINE_BUFFER_SIZE 80U
+#define OPENLOG_CONFIG_FILE "config.txt"
+
+typedef enum
+{
+  OPENLOG_BOOT_MODE_NEWLOG = 0,
+  OPENLOG_BOOT_MODE_SEQLOG = 1,
+  OPENLOG_BOOT_MODE_COMMAND = 2
+} openlog_boot_mode_t;
 
 typedef enum
 {
   OPENLOG_MODE_NEWLOG = 0,
   OPENLOG_MODE_COMMAND,
   OPENLOG_MODE_APPEND,
-  OPENLOG_MODE_WRITE
+  OPENLOG_MODE_WRITE,
+  OPENLOG_MODE_BAUD_MENU,
+  OPENLOG_MODE_SET_MENU
 } openlog_mode_t;
+
+typedef struct
+{
+  uint32_t baud_rate;
+  uint8_t escape_char;
+  uint8_t escape_count;
+  uint8_t boot_mode;
+  uint8_t verbose_errors;
+  uint8_t echo_enabled;
+  uint8_t ignore_rx_on_boot;
+} openlog_config_t;
 
 typedef struct
 {
@@ -43,6 +64,20 @@ typedef struct
 } openlog_context_t;
 
 static openlog_context_t g_openlog;
+static openlog_config_t g_openlog_config;
+
+static void openlog_config_set_defaults(void);
+static uint8_t openlog_config_baud_valid(uint32_t baud_rate);
+static uint8_t openlog_config_load(void);
+static uint8_t openlog_config_save(void);
+static uint8_t openlog_boot_mode_enter(uint8_t write_prompt);
+static uint8_t openlog_reinitialize(uint8_t write_prompt, uint8_t force_command_mode);
+static uint8_t openlog_start_sequential_log(void);
+static uint8_t openlog_rx_line_is_low(void);
+static void openlog_write_prompt_for_mode(void);
+static void openlog_report_error(const char *message);
+static uint8_t openlog_wildcard_match(const char *pattern, const char *text);
+static void openlog_handle_menu_line(char *line);
 
 static uint8_t openlog_char_equal(char left, char right)
 {
@@ -96,7 +131,43 @@ static void openlog_write_prompt(const char *suffix)
 static void openlog_write_prompt_line(void)
 {
   openlog_write_crlf();
-  openlog_write_prompt(OPENLOG_PROMPT_COMMAND);
+  openlog_write_prompt_for_mode();
+}
+
+static void openlog_write_prompt_for_mode(void)
+{
+  switch(g_openlog.mode)
+  {
+    case OPENLOG_MODE_NEWLOG:
+    case OPENLOG_MODE_APPEND:
+      openlog_write_prompt(OPENLOG_PROMPT_RECORD);
+      break;
+
+    default:
+      openlog_write_prompt(OPENLOG_PROMPT_COMMAND);
+      break;
+  }
+}
+
+static void openlog_config_set_defaults(void)
+{
+  g_openlog_config.baud_rate = 9600U;
+  g_openlog_config.escape_char = OPENLOG_ESCAPE_CHAR;
+  g_openlog_config.escape_count = OPENLOG_ESCAPE_COUNT;
+  g_openlog_config.boot_mode = OPENLOG_BOOT_MODE_NEWLOG;
+  g_openlog_config.verbose_errors = 1U;
+  g_openlog_config.echo_enabled = 1U;
+  g_openlog_config.ignore_rx_on_boot = 0U;
+}
+
+static uint8_t openlog_config_baud_valid(uint32_t baud_rate)
+{
+  return (baud_rate >= 300U && baud_rate <= 1000000U) ? 1U : 0U;
+}
+
+static uint8_t openlog_rx_line_is_low(void)
+{
+  return gpio_input_data_bit_read(GPIOA, GPIO_PINS_10) == RESET ? 1U : 0U;
 }
 
 static char *openlog_next_token(char **cursor)
@@ -146,6 +217,19 @@ static void openlog_write_hex_byte(uint8_t value)
   openlog_write_text(buffer);
 }
 
+static void openlog_report_error(const char *message)
+{
+  if(g_openlog_config.verbose_errors != 0U)
+  {
+    openlog_write_crlf();
+    openlog_write_text(message);
+  }
+  else
+  {
+    openlog_write_text("\r\n!");
+  }
+}
+
 static int8_t openlog_find_node(const char *name)
 {
   if(name == NULL)
@@ -165,6 +249,207 @@ static int8_t openlog_find_node(const char *name)
   }
 
   return openlog_fs_find_child(g_openlog.current_dir, name);
+}
+
+static uint8_t openlog_wildcard_match(const char *pattern, const char *text)
+{
+  if(pattern == NULL || text == NULL)
+  {
+    return 0U;
+  }
+
+  if(*pattern == '\0')
+  {
+    return *text == '\0' ? 1U : 0U;
+  }
+
+  if(*pattern == '*')
+  {
+    do
+    {
+      if(openlog_wildcard_match(pattern + 1, text) != 0U)
+      {
+        return 1U;
+      }
+    }
+    while(*text++ != '\0');
+    return 0U;
+  }
+
+  if(*text == '\0')
+  {
+    return 0U;
+  }
+
+  if(*pattern == '?' || openlog_char_equal(*pattern, *text) != 0U)
+  {
+    return openlog_wildcard_match(pattern + 1, text + 1);
+  }
+
+  return 0U;
+}
+
+static uint8_t openlog_config_load(void)
+{
+  int8_t node_id;
+  char buffer[96];
+  int32_t bytes_read;
+  char *line_end;
+  char *field;
+  uint32_t parsed[7];
+  uint8_t field_count;
+  uint8_t needs_save;
+  uint8_t index;
+
+  openlog_config_set_defaults();
+  node_id = openlog_fs_find_child(openlog_fs_root(), OPENLOG_CONFIG_FILE);
+  if(node_id < 0)
+  {
+    return openlog_config_save();
+  }
+
+  bytes_read = openlog_fs_read((uint8_t)node_id, 0U, (uint8_t *)buffer, sizeof(buffer) - 1U);
+  if(bytes_read <= 0)
+  {
+    return 0U;
+  }
+
+  buffer[bytes_read] = '\0';
+  line_end = strpbrk(buffer, "\r\n");
+  if(line_end != NULL)
+  {
+    *line_end = '\0';
+  }
+
+  field_count = 0U;
+  needs_save = 0U;
+  field = strtok(buffer, ",");
+  while(field != NULL && field_count < 7U)
+  {
+    parsed[field_count++] = strtoul(field, NULL, 10);
+    field = strtok(NULL, ",");
+  }
+
+  if(field_count < 4U)
+  {
+    return 0U;
+  }
+
+  if(!openlog_config_baud_valid(parsed[0]))
+  {
+    needs_save = 1U;
+  }
+  else
+  {
+    g_openlog_config.baud_rate = parsed[0];
+  }
+
+  if(parsed[1] > 255U)
+  {
+    needs_save = 1U;
+  }
+  else
+  {
+    g_openlog_config.escape_char = (uint8_t)parsed[1];
+  }
+
+  if(parsed[2] > 254U)
+  {
+    needs_save = 1U;
+  }
+  else
+  {
+    g_openlog_config.escape_count = (uint8_t)parsed[2];
+  }
+
+  if(parsed[3] > 2U)
+  {
+    needs_save = 1U;
+  }
+  else
+  {
+    g_openlog_config.boot_mode = (uint8_t)parsed[3];
+  }
+
+  for(index = field_count; index < 7U; ++index)
+  {
+    needs_save = 1U;
+  }
+
+  if(field_count >= 5U)
+  {
+    if(parsed[4] > 1U)
+    {
+      needs_save = 1U;
+    }
+    else
+    {
+      g_openlog_config.verbose_errors = (uint8_t)parsed[4];
+    }
+  }
+  if(field_count >= 6U)
+  {
+    if(parsed[5] > 1U)
+    {
+      needs_save = 1U;
+    }
+    else
+    {
+      g_openlog_config.echo_enabled = (uint8_t)parsed[5];
+    }
+  }
+  if(field_count >= 7U)
+  {
+    if(parsed[6] > 1U)
+    {
+      needs_save = 1U;
+    }
+    else
+    {
+      g_openlog_config.ignore_rx_on_boot = (uint8_t)parsed[6];
+    }
+  }
+
+  if(needs_save != 0U)
+  {
+    (void)openlog_config_save();
+  }
+  return 1U;
+}
+
+static uint8_t openlog_config_save(void)
+{
+  char buffer[96];
+  int8_t node_id;
+  int written;
+
+  node_id = openlog_fs_create_file(openlog_fs_root(), OPENLOG_CONFIG_FILE, 0U);
+  if(node_id < 0)
+  {
+    return 0U;
+  }
+
+  written = snprintf(buffer, sizeof(buffer),
+                     "%lu,%u,%u,%u,%u,%u,%u\r\n"
+                     "baud,escape,esc#,mode,verb,echo,ignoreRX\r\n",
+                     (unsigned long)g_openlog_config.baud_rate,
+                     g_openlog_config.escape_char,
+                     g_openlog_config.escape_count,
+                     g_openlog_config.boot_mode,
+                     g_openlog_config.verbose_errors,
+                     g_openlog_config.echo_enabled,
+                     g_openlog_config.ignore_rx_on_boot);
+  if(written <= 0)
+  {
+    return 0U;
+  }
+
+  if(openlog_fs_truncate((uint8_t)node_id, 0U) != 0)
+  {
+    return 0U;
+  }
+
+  return openlog_fs_write((uint8_t)node_id, 0U, (const uint8_t *)buffer, (uint16_t)written) == 0 ? 1U : 0U;
 }
 
 static uint8_t openlog_create_newlog_file(void)
@@ -188,6 +473,22 @@ static uint8_t openlog_create_newlog_file(void)
   return 0U;
 }
 
+static uint8_t openlog_start_sequential_log(void)
+{
+  int8_t node_id;
+
+  node_id = openlog_fs_create_file(openlog_fs_root(), "SEQLOG.TXT", 0U);
+  if(node_id < 0)
+  {
+    return 0U;
+  }
+
+  g_openlog.active_file = (uint8_t)node_id;
+  g_openlog.mode = OPENLOG_MODE_APPEND;
+  g_openlog.escape_count = 0U;
+  return 1U;
+}
+
 static void openlog_enter_command_mode(void)
 {
   g_openlog.mode = OPENLOG_MODE_COMMAND;
@@ -196,12 +497,108 @@ static void openlog_enter_command_mode(void)
   openlog_write_prompt_line();
 }
 
+static uint8_t openlog_boot_mode_enter(uint8_t write_prompt)
+{
+  g_openlog.current_dir = openlog_fs_root();
+  g_openlog.escape_count = 0U;
+  g_openlog.line_length = 0U;
+  g_openlog.write_line_length = 0U;
+  g_openlog.ignore_lf = 0U;
+  g_openlog.write_ignore_lf = 0U;
+  g_openlog.write_offset = 0U;
+
+  switch(g_openlog_config.boot_mode)
+  {
+    case OPENLOG_BOOT_MODE_NEWLOG:
+      g_openlog.mode = OPENLOG_MODE_NEWLOG;
+      if(openlog_create_newlog_file() == 0U)
+      {
+        g_openlog.mode = OPENLOG_MODE_COMMAND;
+        if(write_prompt != 0U)
+        {
+          g_openlog.mode = OPENLOG_MODE_COMMAND;
+          openlog_write_prompt_for_mode();
+          openlog_report_error("error: cannot create log file");
+          openlog_write_prompt_line();
+        }
+        return 0U;
+      }
+      if(write_prompt != 0U)
+      {
+        openlog_write_prompt(OPENLOG_PROMPT_RECORD);
+      }
+      return 1U;
+
+    case OPENLOG_BOOT_MODE_SEQLOG:
+      if(openlog_start_sequential_log() == 0U)
+      {
+        g_openlog.mode = OPENLOG_MODE_COMMAND;
+        if(write_prompt != 0U)
+        {
+          g_openlog.mode = OPENLOG_MODE_COMMAND;
+          openlog_write_prompt_for_mode();
+          openlog_report_error("error: cannot open SEQLOG.TXT");
+          openlog_write_prompt_line();
+        }
+        return 0U;
+      }
+      if(write_prompt != 0U)
+      {
+        openlog_write_prompt(OPENLOG_PROMPT_RECORD);
+      }
+      return 1U;
+
+    case OPENLOG_BOOT_MODE_COMMAND:
+    default:
+      g_openlog.mode = OPENLOG_MODE_COMMAND;
+      if(write_prompt != 0U)
+      {
+        openlog_write_prompt(OPENLOG_PROMPT_COMMAND);
+      }
+      return 1U;
+  }
+}
+
+static uint8_t openlog_reinitialize(uint8_t write_prompt, uint8_t force_command_mode)
+{
+  openlog_fs_init();
+  if(openlog_config_load() == 0U)
+  {
+    openlog_config_set_defaults();
+    (void)openlog_config_save();
+  }
+  if(g_openlog_config.baud_rate != 115200U)
+  {
+    wk_usart1_set_baud(g_openlog_config.baud_rate);
+  }
+  else
+  {
+    wk_usart1_set_baud(115200U);
+  }
+  if(force_command_mode != 0U)
+  {
+    g_openlog.mode = OPENLOG_MODE_COMMAND;
+    g_openlog.current_dir = openlog_fs_root();
+    g_openlog.escape_count = 0U;
+    g_openlog.line_length = 0U;
+    g_openlog.write_line_length = 0U;
+    g_openlog.ignore_lf = 0U;
+    g_openlog.write_ignore_lf = 0U;
+    if(write_prompt != 0U)
+    {
+      openlog_write_prompt(OPENLOG_PROMPT_COMMAND);
+    }
+    return 1U;
+  }
+  return openlog_boot_mode_enter(write_prompt);
+}
+
 static void openlog_handle_stream_byte(uint8_t byte)
 {
-  if(byte == OPENLOG_ESCAPE_CHAR)
+  if(g_openlog_config.escape_count != 0U && byte == g_openlog_config.escape_char)
   {
     ++g_openlog.escape_count;
-    if(g_openlog.escape_count >= OPENLOG_ESCAPE_COUNT)
+    if(g_openlog.escape_count >= g_openlog_config.escape_count)
     {
       openlog_enter_command_mode();
     }
@@ -210,9 +607,12 @@ static void openlog_handle_stream_byte(uint8_t byte)
 
   while(g_openlog.escape_count > 0U)
   {
-    if(openlog_fs_append(g_openlog.active_file, &((uint8_t){OPENLOG_ESCAPE_CHAR}), 1U) != 0)
+    uint8_t escaped_byte;
+
+    escaped_byte = g_openlog_config.escape_char;
+    if(openlog_fs_append(g_openlog.active_file, &escaped_byte, 1U) != 0)
     {
-      openlog_write_text("\r\nerror: storage full");
+      openlog_report_error("error: storage full");
       openlog_enter_command_mode();
       return;
     }
@@ -221,15 +621,15 @@ static void openlog_handle_stream_byte(uint8_t byte)
 
   if(openlog_fs_append(g_openlog.active_file, &byte, 1U) != 0)
   {
-    openlog_write_text("\r\nerror: storage full");
+    openlog_report_error("error: storage full");
     openlog_enter_command_mode();
   }
 }
 
 static void openlog_print_help(void)
 {
-  openlog_write_text("\r\nnew append write rm size read cat ls md cd sync reset ?");
-  openlog_write_text("\r\ndisk available, baud/init unsupported");
+  openlog_write_text("\r\nnew append write rm size read cat ls md cd sync reset init disk baud set verbose ?");
+  openlog_write_text("\r\necho on|off, verbose on|off, rm/ls support * and ?");
 }
 
 static void openlog_print_path(void)
@@ -270,32 +670,83 @@ static void openlog_print_path(void)
   }
 }
 
-static void openlog_command_ls(void)
+typedef struct
 {
-  uint8_t index;
+  const char *pattern;
   uint8_t found;
-  const openlog_fs_node_t *node;
+} openlog_ls_context_t;
 
-  openlog_fs_refresh_dir(g_openlog.current_dir);
-  found = 0U;
-  for(index = 0U; index < OPENLOG_FS_MAX_NODES; ++index)
+typedef struct
+{
+  const char *pattern;
+  uint8_t recursive;
+  uint8_t deleted_any;
+  uint8_t failed;
+} openlog_rm_context_t;
+
+static void openlog_ls_iterate_callback(uint8_t node_id,
+                                        const openlog_fs_node_t *node,
+                                        void *context)
+{
+  openlog_ls_context_t *ls_context;
+
+  (void)node_id;
+  ls_context = (openlog_ls_context_t *)context;
+  if(node == NULL)
   {
-    node = openlog_fs_node_get(index);
-    if(node != NULL &&
-       index != openlog_fs_root() &&
-       node->parent == g_openlog.current_dir)
-    {
-      openlog_write_crlf();
-      if(node->is_dir != 0U)
-      {
-        openlog_write_text("\\");
-      }
-      openlog_write_text(node->name);
-      found = 1U;
-    }
+    return;
   }
 
-  if(found == 0U)
+  if(ls_context->pattern != NULL &&
+     openlog_wildcard_match(ls_context->pattern, node->name) == 0U)
+  {
+    return;
+  }
+
+  openlog_write_crlf();
+  if(node->is_dir != 0U)
+  {
+    openlog_write_text("\\");
+  }
+  openlog_write_text(node->name);
+  ls_context->found = 1U;
+}
+
+static void openlog_rm_iterate_callback(uint8_t node_id,
+                                        const openlog_fs_node_t *node,
+                                        void *context)
+{
+  openlog_rm_context_t *rm_context;
+  int8_t target_id;
+
+  rm_context = (openlog_rm_context_t *)context;
+  if(node == NULL || rm_context == NULL)
+  {
+    return;
+  }
+
+  if(openlog_wildcard_match(rm_context->pattern, node->name) == 0U)
+  {
+    return;
+  }
+
+  target_id = node_id != 0xFFU ? (int8_t)node_id : openlog_find_node(node->name);
+  if(target_id < 0 || openlog_fs_delete((uint8_t)target_id, rm_context->recursive) != 0)
+  {
+    rm_context->failed = 1U;
+    return;
+  }
+  rm_context->deleted_any = 1U;
+}
+
+static void openlog_command_ls(const char *pattern)
+{
+  openlog_ls_context_t context;
+
+  context.pattern = pattern;
+  context.found = 0U;
+  openlog_fs_iterate_dir(g_openlog.current_dir, openlog_ls_iterate_callback, &context);
+  if(context.found == 0U)
   {
     openlog_write_text("\r\n<empty>");
   }
@@ -414,7 +865,7 @@ static void openlog_start_append(const char *name)
   node_id = openlog_fs_create_file(g_openlog.current_dir, name, 0U);
   if(node_id < 0)
   {
-    openlog_write_text("\r\nerror: cannot open file");
+    openlog_report_error("error: cannot open file");
     return;
   }
 
@@ -430,7 +881,7 @@ static void openlog_start_write(const char *name, uint32_t offset)
   node_id = openlog_fs_create_file(g_openlog.current_dir, name, 0U);
   if(node_id < 0)
   {
-    openlog_write_text("\r\nerror: cannot open file");
+    openlog_report_error("error: cannot open file");
     return;
   }
 
@@ -440,6 +891,105 @@ static void openlog_start_write(const char *name, uint32_t offset)
   g_openlog.write_ignore_lf = 0U;
   g_openlog.mode = OPENLOG_MODE_WRITE;
   openlog_write_text("\r\nwrite mode, empty line exits");
+}
+
+static int8_t openlog_parse_on_off(const char *value)
+{
+  if(value == NULL)
+  {
+    return -1;
+  }
+  if(openlog_text_equal(value, "on"))
+  {
+    return 1;
+  }
+  if(openlog_text_equal(value, "off"))
+  {
+    return 0;
+  }
+  return -1;
+}
+
+static void openlog_handle_menu_line(char *line)
+{
+  uint32_t baud_rate;
+
+  if(g_openlog.mode == OPENLOG_MODE_BAUD_MENU)
+  {
+    if(openlog_text_equal(line, "x") || openlog_text_equal(line, "q"))
+    {
+      g_openlog.mode = OPENLOG_MODE_COMMAND;
+      openlog_write_prompt_line();
+      return;
+    }
+
+    baud_rate = strtoul(line, NULL, 10);
+    if(!openlog_config_baud_valid(baud_rate))
+    {
+      openlog_report_error("error: invalid baud");
+      g_openlog.mode = OPENLOG_MODE_COMMAND;
+      openlog_write_prompt_line();
+      return;
+    }
+
+    g_openlog_config.baud_rate = baud_rate;
+    if(openlog_config_save() == 0U)
+    {
+      openlog_report_error("error: cannot save config");
+      g_openlog.mode = OPENLOG_MODE_COMMAND;
+      openlog_write_prompt_line();
+      return;
+    }
+
+    openlog_write_text("\r\nswitching baud");
+    wk_usart1_flush();
+    wk_delay_ms(20U);
+    wk_usart1_set_baud(baud_rate);
+    g_openlog.mode = OPENLOG_MODE_COMMAND;
+    openlog_write_prompt_line();
+    return;
+  }
+
+  if(g_openlog.mode == OPENLOG_MODE_SET_MENU)
+  {
+    if(openlog_text_equal(line, "x") || openlog_text_equal(line, "q"))
+    {
+      g_openlog.mode = OPENLOG_MODE_COMMAND;
+      openlog_write_prompt_line();
+      return;
+    }
+
+    if(openlog_text_equal(line, "0") || openlog_text_equal(line, "newlog"))
+    {
+      g_openlog_config.boot_mode = OPENLOG_BOOT_MODE_NEWLOG;
+    }
+    else if(openlog_text_equal(line, "1") || openlog_text_equal(line, "sequential") || openlog_text_equal(line, "seqlog"))
+    {
+      g_openlog_config.boot_mode = OPENLOG_BOOT_MODE_SEQLOG;
+    }
+    else if(openlog_text_equal(line, "2") || openlog_text_equal(line, "command"))
+    {
+      g_openlog_config.boot_mode = OPENLOG_BOOT_MODE_COMMAND;
+    }
+    else
+    {
+      openlog_report_error("error: invalid mode");
+      g_openlog.mode = OPENLOG_MODE_COMMAND;
+      openlog_write_prompt_line();
+      return;
+    }
+
+    if(openlog_config_save() == 0U)
+    {
+      openlog_report_error("error: cannot save config");
+    }
+    else
+    {
+      openlog_write_text("\r\nmode saved");
+    }
+    g_openlog.mode = OPENLOG_MODE_COMMAND;
+    openlog_write_prompt_line();
+  }
 }
 
 static void openlog_process_command(char *line)
@@ -473,18 +1023,18 @@ static void openlog_process_command(char *line)
   {
     if(arg1 == NULL)
     {
-      openlog_write_text("\r\nerror: missing file");
+      openlog_report_error("error: missing file");
     }
     else if(openlog_fs_create_file(g_openlog.current_dir, arg1, 1U) < 0)
     {
-      openlog_write_text("\r\nerror: cannot create file");
+      openlog_report_error("error: cannot create file");
     }
   }
   else if(openlog_text_equal(command, "append"))
   {
     if(arg1 == NULL)
     {
-      openlog_write_text("\r\nerror: missing file");
+      openlog_report_error("error: missing file");
     }
     else
     {
@@ -498,13 +1048,13 @@ static void openlog_process_command(char *line)
 
     if(arg1 == NULL)
     {
-      openlog_write_text("\r\nerror: missing file");
+      openlog_report_error("error: missing file");
     }
     else
     {
       if(arg2 != NULL)
       {
-        offset = (uint16_t)strtoul(arg2, NULL, 10);
+        offset = strtoul(arg2, NULL, 10);
       }
       openlog_start_write(arg1, offset);
       return;
@@ -522,14 +1072,28 @@ static void openlog_process_command(char *line)
 
     if(arg1 == NULL)
     {
-      openlog_write_text("\r\nerror: missing target");
+      openlog_report_error("error: missing target");
+    }
+    else if(strchr(arg1, '*') != NULL || strchr(arg1, '?') != NULL)
+    {
+      openlog_rm_context_t context;
+
+      context.pattern = arg1;
+      context.recursive = recursive;
+      context.deleted_any = 0U;
+      context.failed = 0U;
+      openlog_fs_iterate_dir(g_openlog.current_dir, openlog_rm_iterate_callback, &context);
+      if(context.deleted_any == 0U || context.failed != 0U)
+      {
+        openlog_report_error("error: delete failed");
+      }
     }
     else
     {
       node_id = openlog_find_node(arg1);
       if(node_id < 0 || openlog_fs_delete((uint8_t)node_id, recursive) != 0)
       {
-        openlog_write_text("\r\nerror: delete failed");
+        openlog_report_error("error: delete failed");
       }
     }
   }
@@ -537,7 +1101,7 @@ static void openlog_process_command(char *line)
   {
     if(arg1 == NULL)
     {
-      openlog_write_text("\r\nerror: missing file");
+      openlog_report_error("error: missing file");
     }
     else
     {
@@ -546,7 +1110,7 @@ static void openlog_process_command(char *line)
       node = node_id >= 0 ? openlog_fs_node_get((uint8_t)node_id) : NULL;
       if(node == NULL || node->is_dir != 0U)
       {
-        openlog_write_text("\r\nerror: not a file");
+        openlog_report_error("error: not a file");
       }
       else
       {
@@ -563,14 +1127,14 @@ static void openlog_process_command(char *line)
 
     if(arg1 == NULL)
     {
-      openlog_write_text("\r\nerror: missing file");
+      openlog_report_error("error: missing file");
     }
     else
     {
       node_id = openlog_find_node(arg1);
       if(node_id < 0)
       {
-        openlog_write_text("\r\nerror: file not found");
+        openlog_report_error("error: file not found");
       }
       else
       {
@@ -594,14 +1158,14 @@ static void openlog_process_command(char *line)
   {
     if(arg1 == NULL)
     {
-      openlog_write_text("\r\nerror: missing file");
+      openlog_report_error("error: missing file");
     }
     else
     {
       node_id = openlog_find_node(arg1);
       if(node_id < 0)
       {
-        openlog_write_text("\r\nerror: file not found");
+        openlog_report_error("error: file not found");
       }
       else
       {
@@ -611,13 +1175,13 @@ static void openlog_process_command(char *line)
   }
   else if(openlog_text_equal(command, "ls"))
   {
-    openlog_command_ls();
+    openlog_command_ls(arg1);
   }
   else if(openlog_text_equal(command, "md"))
   {
     if(arg1 == NULL || openlog_fs_create_dir(g_openlog.current_dir, arg1) < 0)
     {
-      openlog_write_text("\r\nerror: cannot create directory");
+      openlog_report_error("error: cannot create directory");
     }
   }
   else if(openlog_text_equal(command, "cd"))
@@ -632,11 +1196,11 @@ static void openlog_process_command(char *line)
       node_id = openlog_find_node(arg1);
       if(node_id < 0)
       {
-        openlog_write_text("\r\nerror: directory not found");
+        openlog_report_error("error: directory not found");
       }
       else if(openlog_fs_node_get((uint8_t)node_id)->is_dir == 0U)
       {
-        openlog_write_text("\r\nerror: not a directory");
+        openlog_report_error("error: not a directory");
       }
       else
       {
@@ -647,6 +1211,84 @@ static void openlog_process_command(char *line)
   else if(openlog_text_equal(command, "sync"))
   {
     openlog_write_text("\r\nsynced");
+  }
+  else if(openlog_text_equal(command, "baud"))
+  {
+    if(arg1 != NULL)
+    {
+      char baud_line[16];
+
+      snprintf(baud_line, sizeof(baud_line), "%s", arg1);
+      g_openlog.mode = OPENLOG_MODE_BAUD_MENU;
+      openlog_handle_menu_line(baud_line);
+      return;
+    }
+
+    g_openlog.mode = OPENLOG_MODE_BAUD_MENU;
+    openlog_write_text("\r\nenter baud rate, x to exit");
+    openlog_write_prompt_line();
+    return;
+  }
+  else if(openlog_text_equal(command, "set"))
+  {
+    if(arg1 != NULL)
+    {
+      char set_line[16];
+
+      snprintf(set_line, sizeof(set_line), "%s", arg1);
+      g_openlog.mode = OPENLOG_MODE_SET_MENU;
+      openlog_handle_menu_line(set_line);
+      return;
+    }
+
+    g_openlog.mode = OPENLOG_MODE_SET_MENU;
+    openlog_write_text("\r\n0 newlog, 1 seqlog, 2 command, x exit");
+    openlog_write_prompt_line();
+    return;
+  }
+  else if(openlog_text_equal(command, "verbose"))
+  {
+    int8_t state;
+
+    state = openlog_parse_on_off(arg1);
+    if(state < 0)
+    {
+      openlog_report_error("error: usage verbose on|off");
+    }
+    else
+    {
+      g_openlog_config.verbose_errors = (uint8_t)state;
+      if(openlog_config_save() == 0U)
+      {
+        openlog_report_error("error: cannot save config");
+      }
+    }
+  }
+  else if(openlog_text_equal(command, "echo"))
+  {
+    int8_t state;
+
+    state = openlog_parse_on_off(arg1);
+    if(state < 0)
+    {
+      openlog_report_error("error: usage echo on|off");
+    }
+    else
+    {
+      g_openlog_config.echo_enabled = (uint8_t)state;
+      if(openlog_config_save() == 0U)
+      {
+        openlog_report_error("error: cannot save config");
+      }
+    }
+  }
+  else if(openlog_text_equal(command, "init"))
+  {
+    wk_usart1_write_string("\r\nreinitializing\r\n");
+    wk_usart1_flush();
+    wk_delay_ms(20U);
+    (void)openlog_reinitialize(1U, 1U);
+    return;
   }
   else if(openlog_text_equal(command, "reset"))
   {
@@ -662,13 +1304,9 @@ static void openlog_process_command(char *line)
     openlog_write_decimal(openlog_fs_total_bytes());
     openlog_write_text(" bytes");
   }
-  else if(openlog_text_equal(command, "baud") || openlog_text_equal(command, "init"))
-  {
-    openlog_write_text("\r\nunsupported in this firmware");
-  }
   else
   {
-    openlog_write_text("\r\nerror: unknown command");
+    openlog_report_error("error: unknown command");
   }
 
   openlog_write_prompt_line();
@@ -679,10 +1317,20 @@ static void openlog_handle_command_byte(uint8_t byte)
   if(byte == '\r')
   {
     g_openlog.ignore_lf = 1U;
-    wk_usart1_write_byte('\r');
-    wk_usart1_write_byte('\n');
+    if(g_openlog_config.echo_enabled != 0U)
+    {
+      wk_usart1_write_byte('\r');
+      wk_usart1_write_byte('\n');
+    }
     g_openlog.line_buffer[g_openlog.line_length] = '\0';
-    openlog_process_command(g_openlog.line_buffer);
+    if(g_openlog.mode == OPENLOG_MODE_COMMAND)
+    {
+      openlog_process_command(g_openlog.line_buffer);
+    }
+    else
+    {
+      openlog_handle_menu_line(g_openlog.line_buffer);
+    }
     g_openlog.line_length = 0U;
     return;
   }
@@ -694,10 +1342,20 @@ static void openlog_handle_command_byte(uint8_t byte)
       g_openlog.ignore_lf = 0U;
       return;
     }
-    wk_usart1_write_byte('\r');
-    wk_usart1_write_byte('\n');
+    if(g_openlog_config.echo_enabled != 0U)
+    {
+      wk_usart1_write_byte('\r');
+      wk_usart1_write_byte('\n');
+    }
     g_openlog.line_buffer[g_openlog.line_length] = '\0';
-    openlog_process_command(g_openlog.line_buffer);
+    if(g_openlog.mode == OPENLOG_MODE_COMMAND)
+    {
+      openlog_process_command(g_openlog.line_buffer);
+    }
+    else
+    {
+      openlog_handle_menu_line(g_openlog.line_buffer);
+    }
     g_openlog.line_length = 0U;
     return;
   }
@@ -708,7 +1366,10 @@ static void openlog_handle_command_byte(uint8_t byte)
     if(g_openlog.line_length > 0U)
     {
       --g_openlog.line_length;
-      openlog_write_text("\b \b");
+      if(g_openlog_config.echo_enabled != 0U)
+      {
+        openlog_write_text("\b \b");
+      }
     }
     return;
   }
@@ -716,7 +1377,10 @@ static void openlog_handle_command_byte(uint8_t byte)
   if(g_openlog.line_length < OPENLOG_LINE_BUFFER_SIZE)
   {
     g_openlog.line_buffer[g_openlog.line_length++] = (char)byte;
-    wk_usart1_write_byte(byte);
+    if(g_openlog_config.echo_enabled != 0U)
+    {
+      wk_usart1_write_byte(byte);
+    }
   }
 }
 
@@ -737,15 +1401,15 @@ static void openlog_handle_write_byte(uint8_t byte)
                         (const uint8_t *)g_openlog.write_line_buffer,
                         g_openlog.write_line_length) != 0 ||
        openlog_fs_write(g_openlog.active_file,
-                        (uint16_t)(g_openlog.write_offset + g_openlog.write_line_length),
+                        g_openlog.write_offset + g_openlog.write_line_length,
                         (const uint8_t *)"\n", 1U) != 0)
     {
-      openlog_write_text("\r\nerror: storage full");
+      openlog_report_error("error: storage full");
       g_openlog.mode = OPENLOG_MODE_COMMAND;
       openlog_write_prompt_line();
       return;
     }
-    g_openlog.write_offset = (uint16_t)(g_openlog.write_offset + g_openlog.write_line_length + 1U);
+    g_openlog.write_offset = g_openlog.write_offset + g_openlog.write_line_length + 1U;
     g_openlog.write_line_length = 0U;
     return;
   }
@@ -788,20 +1452,20 @@ static void openlog_handle_write_byte(uint8_t byte)
 void openlog_init(void)
 {
   memset(&g_openlog, 0, sizeof(g_openlog));
+  openlog_config_set_defaults();
   openlog_fs_init();
-  g_openlog.current_dir = openlog_fs_root();
-  g_openlog.mode = OPENLOG_MODE_NEWLOG;
-
-  if(openlog_create_newlog_file() == 0U)
+  if(openlog_config_load() == 0U)
   {
-    g_openlog.mode = OPENLOG_MODE_COMMAND;
-    openlog_write_prompt(OPENLOG_PROMPT_COMMAND);
-    openlog_write_text("\r\nerror: cannot create log file");
-    openlog_write_prompt_line();
-    return;
+    openlog_config_set_defaults();
+    (void)openlog_config_save();
   }
-
-  openlog_write_prompt(OPENLOG_PROMPT_RECORD);
+  if(g_openlog_config.ignore_rx_on_boot == 0U && openlog_rx_line_is_low() != 0U)
+  {
+    openlog_config_set_defaults();
+    (void)openlog_config_save();
+  }
+  wk_usart1_set_baud(g_openlog_config.baud_rate);
+  (void)openlog_boot_mode_enter(1U);
 }
 
 void openlog_process(void)
@@ -818,6 +1482,8 @@ void openlog_process(void)
         break;
 
       case OPENLOG_MODE_COMMAND:
+      case OPENLOG_MODE_BAUD_MENU:
+      case OPENLOG_MODE_SET_MENU:
         openlog_handle_command_byte(byte);
         break;
 

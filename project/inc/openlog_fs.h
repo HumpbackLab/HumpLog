@@ -9,7 +9,7 @@ extern "C" {
 #include <stdint.h>
 
 #define OPENLOG_FS_NAME_LENGTH 12U
-#define OPENLOG_FS_MAX_NODES 24U
+#define OPENLOG_FS_MAX_NODES 64U
 #define OPENLOG_FS_MAX_FILE_SLOTS 8U
 #define OPENLOG_FS_FILE_CAPACITY 768U
 #define OPENLOG_FS_PATH_LENGTH 96U
@@ -24,11 +24,18 @@ typedef struct
   char name[OPENLOG_FS_NAME_LENGTH + 1U];
 } openlog_fs_node_t;
 
+typedef void (*openlog_fs_iterate_callback_t)(uint8_t node_id,
+                                              const openlog_fs_node_t *node,
+                                              void *context);
+
 void openlog_fs_init(void);
 uint8_t openlog_fs_root(void);
 uint8_t openlog_fs_node_valid(uint8_t node_id);
 const openlog_fs_node_t *openlog_fs_node_get(uint8_t node_id);
 void openlog_fs_refresh_dir(uint8_t parent_id);
+void openlog_fs_iterate_dir(uint8_t parent_id,
+                            openlog_fs_iterate_callback_t callback,
+                            void *context);
 int8_t openlog_fs_find_child(uint8_t parent_id, const char *name);
 int8_t openlog_fs_create_file(uint8_t parent_id, const char *name, uint8_t fail_if_exists);
 int8_t openlog_fs_create_dir(uint8_t parent_id, const char *name);

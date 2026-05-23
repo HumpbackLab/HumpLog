@@ -111,6 +111,19 @@ void wk_usart1_init(void)
   /* add user code end usart1_init 3 */
 }
 
+void wk_usart1_set_baud(uint32_t baud_rate)
+{
+  wk_usart1_dma_suspend();
+  usart_enable(USART1, FALSE);
+  usart_init(USART1, baud_rate, USART_DATA_8BITS, USART_STOP_1_BIT);
+  usart_transmitter_enable(USART1, TRUE);
+  usart_receiver_enable(USART1, TRUE);
+  usart_parity_selection_config(USART1, USART_PARITY_NONE);
+  usart_hardware_flow_control_set(USART1, USART_HARDWARE_FLOW_NONE);
+  usart_enable(USART1, TRUE);
+  wk_usart1_dma_resume();
+}
+
 static void wk_usart1_rx_dma_config(void)
 {
   dma_init_type dma_init_struct;
