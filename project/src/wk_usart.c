@@ -28,8 +28,8 @@
 #include "wk_usart.h"
 #include <stddef.h>
 
-#define WK_USART1_RX_DMA_BUFFER_SIZE 256U
-#define WK_USART1_TX_DMA_BUFFER_SIZE 512U
+#define WK_USART1_RX_DMA_BUFFER_SIZE 1536U
+#define WK_USART1_TX_DMA_BUFFER_SIZE 768U
 
 static volatile uint8_t g_wk_usart1_rx_dma_buffer[WK_USART1_RX_DMA_BUFFER_SIZE];
 static volatile uint16_t g_wk_usart1_rx_read_index;

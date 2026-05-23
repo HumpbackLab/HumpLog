@@ -34,6 +34,8 @@ extern "C" {
 void wk_timebase_init(void);
 void wk_delay_us(uint32_t delay);
 void wk_delay_ms(uint32_t delay);
+uint32_t wk_timebase_raw_tick(void);
+uint32_t wk_timebase_elapsed_us(uint32_t start_tick);
 
 #ifdef __cplusplus
 }

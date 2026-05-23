@@ -1,6 +1,7 @@
 #include "openlog.h"
 
 #include "openlog_fs.h"
+#include "sd_spi.h"
 #include "wk_system.h"
 #include "wk_usart.h"
 
@@ -17,6 +18,8 @@
 #define OPENLOG_PROMPT_COMMAND ">"
 #define OPENLOG_LINE_BUFFER_SIZE 80U
 #define OPENLOG_WRITE_LINE_BUFFER_SIZE 80U
+#define OPENLOG_STREAM_BUFFER_SIZE 768U
+#define OPENLOG_STREAM_FLUSH_IDLE_US 20000U
 #define OPENLOG_CONFIG_FILE "config.txt"
 
 typedef enum
@@ -55,12 +58,16 @@ typedef struct
   uint8_t escape_count;
   uint8_t line_length;
   uint8_t write_line_length;
+  uint16_t stream_length;
   uint8_t ignore_lf;
   uint8_t write_ignore_lf;
   uint32_t write_offset;
+  uint32_t stream_offset;
+  uint32_t stream_last_tick;
   uint32_t log_sequence;
   char line_buffer[OPENLOG_LINE_BUFFER_SIZE + 1U];
   char write_line_buffer[OPENLOG_WRITE_LINE_BUFFER_SIZE + 1U];
+  uint8_t stream_buffer[OPENLOG_STREAM_BUFFER_SIZE];
 } openlog_context_t;
 
 static openlog_context_t g_openlog;
@@ -74,6 +81,11 @@ static uint8_t openlog_boot_mode_enter(uint8_t write_prompt);
 static uint8_t openlog_reinitialize(uint8_t write_prompt, uint8_t force_command_mode);
 static uint8_t openlog_start_sequential_log(void);
 static uint8_t openlog_rx_line_is_low(void);
+static void openlog_update_log_sequence(void);
+static uint8_t openlog_stream_flush(void);
+static uint8_t openlog_stream_queue_byte(uint8_t byte);
+static void openlog_stream_start(uint8_t node_id, openlog_mode_t mode);
+static void openlog_stream_stop(void);
 static void openlog_write_prompt_for_mode(void);
 static void openlog_report_error(const char *message);
 static uint8_t openlog_wildcard_match(const char *pattern, const char *text);
@@ -289,6 +301,53 @@ static uint8_t openlog_wildcard_match(const char *pattern, const char *text)
   return 0U;
 }
 
+typedef struct
+{
+  uint32_t next_sequence;
+} openlog_log_scan_context_t;
+
+static void openlog_log_scan_callback(uint8_t node_id,
+                                      const openlog_fs_node_t *node,
+                                      void *context)
+{
+  openlog_log_scan_context_t *scan_context;
+  char *end_ptr;
+  unsigned long value;
+
+  (void)node_id;
+  scan_context = (openlog_log_scan_context_t *)context;
+  if(node == NULL || scan_context == NULL || node->is_dir != 0U)
+  {
+    return;
+  }
+
+  if(strncmp(node->name, "LOG", 3U) != 0 || strlen(node->name) != 12U ||
+     strcmp(&node->name[8], ".TXT") != 0)
+  {
+    return;
+  }
+
+  value = strtoul(&node->name[3], &end_ptr, 10);
+  if(end_ptr != &node->name[8])
+  {
+    return;
+  }
+
+  if((uint32_t)(value + 1UL) > scan_context->next_sequence)
+  {
+    scan_context->next_sequence = (uint32_t)(value + 1UL);
+  }
+}
+
+static void openlog_update_log_sequence(void)
+{
+  openlog_log_scan_context_t context;
+
+  context.next_sequence = 0U;
+  openlog_fs_iterate_dir(openlog_fs_root(), openlog_log_scan_callback, &context);
+  g_openlog.log_sequence = context.next_sequence;
+}
+
 static uint8_t openlog_config_load(void)
 {
   int8_t node_id;
@@ -483,14 +542,74 @@ static uint8_t openlog_start_sequential_log(void)
     return 0U;
   }
 
-  g_openlog.active_file = (uint8_t)node_id;
-  g_openlog.mode = OPENLOG_MODE_APPEND;
+  openlog_stream_start((uint8_t)node_id, OPENLOG_MODE_APPEND);
+  return 1U;
+}
+
+static uint8_t openlog_stream_flush(void)
+{
+  if((g_openlog.mode != OPENLOG_MODE_NEWLOG && g_openlog.mode != OPENLOG_MODE_APPEND) ||
+     g_openlog.stream_length == 0U)
+  {
+    return 1U;
+  }
+
+  if(openlog_fs_write(g_openlog.active_file,
+                      g_openlog.stream_offset,
+                      g_openlog.stream_buffer,
+                      g_openlog.stream_length) != 0)
+  {
+    return 0U;
+  }
+
+  g_openlog.stream_offset += g_openlog.stream_length;
+  g_openlog.stream_length = 0U;
+  return 1U;
+}
+
+static void openlog_stream_start(uint8_t node_id, openlog_mode_t mode)
+{
+  const openlog_fs_node_t *node;
+
+  g_openlog.active_file = node_id;
+  g_openlog.mode = mode;
   g_openlog.escape_count = 0U;
+  g_openlog.stream_length = 0U;
+  node = openlog_fs_node_get(node_id);
+  g_openlog.stream_offset = node != NULL ? node->size : 0U;
+  g_openlog.stream_last_tick = wk_timebase_raw_tick();
+}
+
+static void openlog_stream_stop(void)
+{
+  if(openlog_stream_flush() == 0U)
+  {
+    openlog_report_error("error: storage full");
+  }
+  g_openlog.stream_length = 0U;
+}
+
+static uint8_t openlog_stream_queue_byte(uint8_t byte)
+{
+  if(g_openlog.stream_length >= OPENLOG_STREAM_BUFFER_SIZE)
+  {
+    if(openlog_stream_flush() == 0U)
+    {
+      return 0U;
+    }
+  }
+
+  g_openlog.stream_buffer[g_openlog.stream_length++] = byte;
+  g_openlog.stream_last_tick = wk_timebase_raw_tick();
   return 1U;
 }
 
 static void openlog_enter_command_mode(void)
 {
+  if(g_openlog.mode == OPENLOG_MODE_NEWLOG || g_openlog.mode == OPENLOG_MODE_APPEND)
+  {
+    openlog_stream_stop();
+  }
   g_openlog.mode = OPENLOG_MODE_COMMAND;
   g_openlog.escape_count = 0U;
   g_openlog.line_length = 0U;
@@ -499,10 +618,12 @@ static void openlog_enter_command_mode(void)
 
 static uint8_t openlog_boot_mode_enter(uint8_t write_prompt)
 {
+  openlog_update_log_sequence();
   g_openlog.current_dir = openlog_fs_root();
   g_openlog.escape_count = 0U;
   g_openlog.line_length = 0U;
   g_openlog.write_line_length = 0U;
+  g_openlog.stream_length = 0U;
   g_openlog.ignore_lf = 0U;
   g_openlog.write_ignore_lf = 0U;
   g_openlog.write_offset = 0U;
@@ -510,7 +631,6 @@ static uint8_t openlog_boot_mode_enter(uint8_t write_prompt)
   switch(g_openlog_config.boot_mode)
   {
     case OPENLOG_BOOT_MODE_NEWLOG:
-      g_openlog.mode = OPENLOG_MODE_NEWLOG;
       if(openlog_create_newlog_file() == 0U)
       {
         g_openlog.mode = OPENLOG_MODE_COMMAND;
@@ -523,6 +643,7 @@ static uint8_t openlog_boot_mode_enter(uint8_t write_prompt)
         }
         return 0U;
       }
+      openlog_stream_start(g_openlog.active_file, OPENLOG_MODE_NEWLOG);
       if(write_prompt != 0U)
       {
         openlog_write_prompt(OPENLOG_PROMPT_RECORD);
@@ -610,7 +731,7 @@ static void openlog_handle_stream_byte(uint8_t byte)
     uint8_t escaped_byte;
 
     escaped_byte = g_openlog_config.escape_char;
-    if(openlog_fs_append(g_openlog.active_file, &escaped_byte, 1U) != 0)
+    if(openlog_stream_queue_byte(escaped_byte) == 0U)
     {
       openlog_report_error("error: storage full");
       openlog_enter_command_mode();
@@ -619,7 +740,7 @@ static void openlog_handle_stream_byte(uint8_t byte)
     --g_openlog.escape_count;
   }
 
-  if(openlog_fs_append(g_openlog.active_file, &byte, 1U) != 0)
+  if(openlog_stream_queue_byte(byte) == 0U)
   {
     openlog_report_error("error: storage full");
     openlog_enter_command_mode();
@@ -629,7 +750,7 @@ static void openlog_handle_stream_byte(uint8_t byte)
 static void openlog_print_help(void)
 {
   openlog_write_text("\r\nnew append write rm size read cat ls md cd sync reset init disk baud set verbose ?");
-  openlog_write_text("\r\necho on|off, verbose on|off, rm/ls support * and ?");
+  openlog_write_text("\r\necho on|off, verbose on|off, rm/ls support * and ?, set 3=resetlog");
 }
 
 static void openlog_print_path(void)
@@ -764,7 +885,7 @@ static void openlog_command_read(uint8_t node_id, uint32_t start, uint32_t lengt
   node = openlog_fs_node_get(node_id);
   if(node == NULL || node->is_dir != 0U)
   {
-    openlog_write_text("\r\nerror: not a file");
+    openlog_report_error("error: not a file");
     return;
   }
 
@@ -827,12 +948,12 @@ static void openlog_command_cat(uint8_t node_id)
   const openlog_fs_node_t *node;
   uint8_t data_byte;
   int32_t bytes_read;
-  uint16_t index;
+  uint32_t index;
 
   node = openlog_fs_node_get(node_id);
   if(node == NULL || node->is_dir != 0U)
   {
-    openlog_write_text("\r\nerror: not a file");
+    openlog_report_error("error: not a file");
     return;
   }
 
@@ -869,9 +990,7 @@ static void openlog_start_append(const char *name)
     return;
   }
 
-  g_openlog.active_file = (uint8_t)node_id;
-  g_openlog.mode = OPENLOG_MODE_APPEND;
-  g_openlog.escape_count = 0U;
+  openlog_stream_start((uint8_t)node_id, OPENLOG_MODE_APPEND);
 }
 
 static void openlog_start_write(const char *name, uint32_t offset)
@@ -970,6 +1089,14 @@ static void openlog_handle_menu_line(char *line)
     else if(openlog_text_equal(line, "2") || openlog_text_equal(line, "command"))
     {
       g_openlog_config.boot_mode = OPENLOG_BOOT_MODE_COMMAND;
+    }
+    else if(openlog_text_equal(line, "3") || openlog_text_equal(line, "resetlog"))
+    {
+      g_openlog.log_sequence = 0U;
+      openlog_write_text("\r\nlog number reset");
+      g_openlog.mode = OPENLOG_MODE_COMMAND;
+      openlog_write_prompt_line();
+      return;
     }
     else
     {
@@ -1210,7 +1337,14 @@ static void openlog_process_command(char *line)
   }
   else if(openlog_text_equal(command, "sync"))
   {
-    openlog_write_text("\r\nsynced");
+    if(openlog_stream_flush() == 0U)
+    {
+      openlog_report_error("error: storage full");
+    }
+    else
+    {
+      openlog_write_text("\r\nsynced");
+    }
   }
   else if(openlog_text_equal(command, "baud"))
   {
@@ -1242,7 +1376,7 @@ static void openlog_process_command(char *line)
     }
 
     g_openlog.mode = OPENLOG_MODE_SET_MENU;
-    openlog_write_text("\r\n0 newlog, 1 seqlog, 2 command, x exit");
+    openlog_write_text("\r\n0 newlog, 1 seqlog, 2 command, 3 resetlog, x exit");
     openlog_write_prompt_line();
     return;
   }
@@ -1284,6 +1418,7 @@ static void openlog_process_command(char *line)
   }
   else if(openlog_text_equal(command, "init"))
   {
+    openlog_stream_stop();
     wk_usart1_write_string("\r\nreinitializing\r\n");
     wk_usart1_flush();
     wk_delay_ms(20U);
@@ -1292,17 +1427,42 @@ static void openlog_process_command(char *line)
   }
   else if(openlog_text_equal(command, "reset"))
   {
+    openlog_stream_stop();
     openlog_write_text("\r\nresetting");
     wk_delay_ms(10U);
     NVIC_SystemReset();
   }
   else if(openlog_text_equal(command, "disk"))
   {
-    openlog_write_text("\r\nSD ");
-    openlog_write_decimal(openlog_fs_used_bytes());
-    openlog_write_text("/");
-    openlog_write_decimal(openlog_fs_total_bytes());
-    openlog_write_text(" bytes");
+    sd_spi_card_info_t card_info;
+
+    openlog_write_crlf();
+    if(sd_spi_get_card_info(&card_info) == 0U)
+    {
+      openlog_write_text("disk info unavailable");
+    }
+    else
+    {
+      openlog_write_text("MID:");
+      openlog_write_hex_byte(card_info.manufacturer_id);
+      openlog_write_text(" OID:");
+      openlog_write_text(card_info.oem_id);
+      openlog_write_text(" PNM:");
+      openlog_write_text(card_info.product_name);
+      openlog_write_text(" PRV:");
+      openlog_write_decimal(card_info.product_revision_major);
+      openlog_write_text(".");
+      openlog_write_decimal(card_info.product_revision_minor);
+      openlog_write_text(" PSN:");
+      openlog_write_decimal(card_info.serial_number);
+      openlog_write_text(" MDT:");
+      openlog_write_decimal(card_info.manufacture_year);
+      openlog_write_text("/");
+      openlog_write_decimal(card_info.manufacture_month);
+      openlog_write_text(" SIZE:");
+      openlog_write_decimal((card_info.sector_count / 2048U));
+      openlog_write_text("MB");
+    }
   }
   else
   {
@@ -1495,6 +1655,17 @@ void openlog_process(void)
         g_openlog.mode = OPENLOG_MODE_COMMAND;
         openlog_write_prompt_line();
         break;
+    }
+  }
+
+  if((g_openlog.mode == OPENLOG_MODE_NEWLOG || g_openlog.mode == OPENLOG_MODE_APPEND) &&
+     g_openlog.stream_length != 0U &&
+     wk_timebase_elapsed_us(g_openlog.stream_last_tick) >= OPENLOG_STREAM_FLUSH_IDLE_US)
+  {
+    if(openlog_stream_flush() == 0U)
+    {
+      openlog_report_error("error: storage full");
+      openlog_enter_command_mode();
     }
   }
 }

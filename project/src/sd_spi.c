@@ -13,6 +13,7 @@
 #define SD_CMD1   1U
 #define SD_CMD8   8U
 #define SD_CMD9   9U
+#define SD_CMD10 10U
 #define SD_CMD12 12U
 #define SD_CMD16 16U
 #define SD_CMD17 17U
@@ -33,6 +34,7 @@
 static uint8_t g_sd_card_type;
 static uint8_t g_sd_initialized;
 static uint32_t g_sd_sector_count;
+static uint8_t g_sd_cid[16];
 
 static void sd_spi_select(void);
 static void sd_spi_deselect(void);
@@ -41,6 +43,7 @@ static uint8_t sd_spi_send_command(uint8_t command, uint32_t argument);
 static uint8_t sd_spi_receive_data_block(uint8_t *buffer, uint16_t length);
 static uint8_t sd_spi_transmit_data_block(const uint8_t *buffer, uint8_t token);
 static uint8_t sd_spi_read_csd(uint8_t *csd);
+static uint8_t sd_spi_read_cid(uint8_t *cid);
 static uint8_t sd_spi_parse_sector_count(const uint8_t *csd, uint32_t *sector_count);
 
 static void sd_spi_select(void)
@@ -194,6 +197,24 @@ static uint8_t sd_spi_read_csd(uint8_t *csd)
   return 1U;
 }
 
+static uint8_t sd_spi_read_cid(uint8_t *cid)
+{
+  if(sd_spi_send_command(SD_CMD10, 0U) != 0U)
+  {
+    sd_spi_deselect();
+    return 0U;
+  }
+
+  if(!sd_spi_receive_data_block(cid, 16U))
+  {
+    sd_spi_deselect();
+    return 0U;
+  }
+
+  sd_spi_deselect();
+  return 1U;
+}
+
 static uint8_t sd_spi_parse_sector_count(const uint8_t *csd, uint32_t *sector_count)
 {
   uint32_t csize;
@@ -230,6 +251,7 @@ uint8_t sd_spi_initialize(void)
   g_sd_initialized = 0U;
   g_sd_card_type = SD_CARD_TYPE_NONE;
   g_sd_sector_count = 0U;
+  memset(g_sd_cid, 0, sizeof(g_sd_cid));
 
   wk_spi1_set_clock_div(SPI_MCLK_DIV_256);
   sd_spi_deselect();
@@ -337,6 +359,10 @@ uint8_t sd_spi_initialize(void)
   {
     g_sd_card_type = SD_CARD_TYPE_NONE;
     return 0U;
+  }
+  if(!sd_spi_read_cid(g_sd_cid))
+  {
+    memset(g_sd_cid, 0, sizeof(g_sd_cid));
   }
 
   wk_spi1_set_clock_div(SPI_MCLK_DIV_8);
@@ -447,6 +473,38 @@ uint8_t sd_spi_get_erase_block_size(uint32_t *erase_block_size)
   }
 
   *erase_block_size = 1U;
+  return 1U;
+}
+
+uint8_t sd_spi_get_card_info(sd_spi_card_info_t *card_info)
+{
+  uint16_t mdt_year;
+  uint8_t mdt_month;
+
+  if(g_sd_initialized == 0U || card_info == NULL)
+  {
+    return 0U;
+  }
+
+  memset(card_info, 0, sizeof(*card_info));
+  card_info->manufacturer_id = g_sd_cid[0];
+  card_info->oem_id[0] = (char)g_sd_cid[1];
+  card_info->oem_id[1] = (char)g_sd_cid[2];
+  card_info->oem_id[2] = '\0';
+  memcpy(card_info->product_name, &g_sd_cid[3], 5U);
+  card_info->product_name[5] = '\0';
+  card_info->product_revision_major = (uint8_t)(g_sd_cid[8] >> 4);
+  card_info->product_revision_minor = (uint8_t)(g_sd_cid[8] & 0x0FU);
+  card_info->serial_number = ((uint32_t)g_sd_cid[9] << 24) |
+                             ((uint32_t)g_sd_cid[10] << 16) |
+                             ((uint32_t)g_sd_cid[11] << 8) |
+                             (uint32_t)g_sd_cid[12];
+  mdt_year = (uint16_t)(((uint16_t)(g_sd_cid[13] & 0x0FU) << 4) |
+                        ((uint16_t)g_sd_cid[14] >> 4));
+  mdt_month = (uint8_t)(g_sd_cid[14] & 0x0FU);
+  card_info->manufacture_year = (uint16_t)(2000U + mdt_year);
+  card_info->manufacture_month = mdt_month;
+  card_info->sector_count = g_sd_sector_count;
   return 1U;
 }
 

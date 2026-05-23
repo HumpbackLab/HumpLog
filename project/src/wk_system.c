@@ -74,6 +74,28 @@ __WEAK void wk_delay_ms(uint32_t delay)
   }
 }
 
+__WEAK uint32_t wk_timebase_raw_tick(void)
+{
+  return TICK_COUNT_VALUE;
+}
+
+__WEAK uint32_t wk_timebase_elapsed_us(uint32_t start_tick)
+{
+  uint32_t current_tick;
+  uint32_t delta_ticks;
+
+  current_tick = TICK_COUNT_VALUE;
+  delta_ticks = (current_tick <= start_tick) ?
+                (start_tick - current_tick) :
+                ((TICK_COUNT_MAX - current_tick) + start_tick + 1U);
+  if(ticks_count_us == 0U)
+  {
+    return 0U;
+  }
+
+  return delta_ticks / ticks_count_us;
+}
+
 /**
   * @brief  this function configures the source of the time base.
   * @param  none
