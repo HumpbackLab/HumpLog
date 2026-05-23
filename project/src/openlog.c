@@ -73,8 +73,24 @@ typedef struct
   uint8_t stream_buffer[OPENLOG_STREAM_BUFFER_COUNT][OPENLOG_STREAM_BUFFER_SIZE];
 } openlog_context_t;
 
+typedef struct
+{
+  uint32_t flush_calls;
+  uint32_t flush_bytes;
+  uint32_t flush_total_us;
+  uint32_t flush_max_us;
+  uint32_t write_calls;
+  uint32_t write_bytes;
+  uint32_t write_total_us;
+  uint32_t write_max_us;
+  uint32_t sync_calls;
+  uint32_t sync_total_us;
+  uint32_t sync_max_us;
+} openlog_stream_stats_t;
+
 static openlog_context_t g_openlog;
 static openlog_config_t g_openlog_config;
+static openlog_stream_stats_t g_openlog_stream_stats;
 
 static void openlog_config_set_defaults(void);
 static uint8_t openlog_config_baud_valid(uint32_t baud_rate);
@@ -96,6 +112,8 @@ static void openlog_write_prompt_for_mode(void);
 static void openlog_report_error(const char *message);
 static uint8_t openlog_wildcard_match(const char *pattern, const char *text);
 static void openlog_handle_menu_line(char *line);
+static void openlog_stream_stats_reset(void);
+static void openlog_command_stats(const char *arg1);
 
 static uint8_t openlog_char_equal(char left, char right)
 {
@@ -554,12 +572,20 @@ static uint8_t openlog_start_sequential_log(void)
 
 static uint8_t openlog_stream_flush(void)
 {
+  uint32_t start_tick;
+  uint32_t elapsed_us;
+  uint32_t pending_bytes;
+  uint32_t sync_start_tick;
+  uint32_t sync_elapsed_us;
+
   if((g_openlog.mode != OPENLOG_MODE_NEWLOG && g_openlog.mode != OPENLOG_MODE_APPEND) ||
      (g_openlog.stream_length[0] == 0U && g_openlog.stream_length[1] == 0U))
   {
     return 1U;
   }
 
+  pending_bytes = (uint32_t)g_openlog.stream_length[0] + (uint32_t)g_openlog.stream_length[1];
+  start_tick = wk_timebase_raw_tick();
   if(openlog_stream_commit_active() == 0U)
   {
     return 0U;
@@ -570,13 +596,36 @@ static uint8_t openlog_stream_flush(void)
     return 0U;
   }
 
-  return openlog_fs_stream_sync() == 0 ? 1U : 0U;
+  sync_start_tick = wk_timebase_raw_tick();
+  if(openlog_fs_stream_sync() != 0)
+  {
+    return 0U;
+  }
+  sync_elapsed_us = wk_timebase_elapsed_us(sync_start_tick);
+  g_openlog_stream_stats.sync_calls += 1U;
+  g_openlog_stream_stats.sync_total_us += sync_elapsed_us;
+  if(sync_elapsed_us > g_openlog_stream_stats.sync_max_us)
+  {
+    g_openlog_stream_stats.sync_max_us = sync_elapsed_us;
+  }
+
+  elapsed_us = wk_timebase_elapsed_us(start_tick);
+  g_openlog_stream_stats.flush_calls += 1U;
+  g_openlog_stream_stats.flush_bytes += pending_bytes;
+  g_openlog_stream_stats.flush_total_us += elapsed_us;
+  if(elapsed_us > g_openlog_stream_stats.flush_max_us)
+  {
+    g_openlog_stream_stats.flush_max_us = elapsed_us;
+  }
+  return 1U;
 }
 
 static uint8_t openlog_stream_flush_pending(void)
 {
   uint8_t pending_index;
   uint16_t pending_length;
+  uint32_t start_tick;
+  uint32_t elapsed_us;
 
   pending_index = (uint8_t)(g_openlog.stream_active_index ^ 1U);
   pending_length = g_openlog.stream_length[pending_index];
@@ -585,11 +634,20 @@ static uint8_t openlog_stream_flush_pending(void)
     return 1U;
   }
 
+  start_tick = wk_timebase_raw_tick();
   if(openlog_fs_stream_write(g_openlog.stream_buffer[pending_index], pending_length) != 0)
   {
     return 0U;
   }
 
+  elapsed_us = wk_timebase_elapsed_us(start_tick);
+  g_openlog_stream_stats.write_calls += 1U;
+  g_openlog_stream_stats.write_bytes += pending_length;
+  g_openlog_stream_stats.write_total_us += elapsed_us;
+  if(elapsed_us > g_openlog_stream_stats.write_max_us)
+  {
+    g_openlog_stream_stats.write_max_us = elapsed_us;
+  }
   g_openlog.stream_offset += pending_length;
   g_openlog.stream_length[pending_index] = 0U;
   return 1U;
@@ -714,6 +772,59 @@ static void openlog_reset_runtime_state(void)
   g_openlog.stream_last_tick = wk_timebase_raw_tick();
   memset(g_openlog.line_buffer, 0, sizeof(g_openlog.line_buffer));
   memset(g_openlog.write_line_buffer, 0, sizeof(g_openlog.write_line_buffer));
+}
+
+static void openlog_stream_stats_reset(void)
+{
+  memset(&g_openlog_stream_stats, 0, sizeof(g_openlog_stream_stats));
+}
+
+static void openlog_command_stats(const char *arg1)
+{
+  uint32_t avg_us;
+
+  if(arg1 != NULL && openlog_text_equal(arg1, "reset"))
+  {
+    openlog_stream_stats_reset();
+    openlog_write_text("\r\nstats reset");
+    return;
+  }
+
+  openlog_write_text("\r\nbuf=");
+  openlog_write_decimal(OPENLOG_STREAM_BUFFER_SIZE);
+  openlog_write_text(" rxovr=");
+  openlog_write_decimal(wk_usart1_rx_overrun_bytes());
+
+  openlog_write_text("\r\nflush calls=");
+  openlog_write_decimal(g_openlog_stream_stats.flush_calls);
+  openlog_write_text(" bytes=");
+  openlog_write_decimal(g_openlog_stream_stats.flush_bytes);
+  openlog_write_text(" avg_us=");
+  avg_us = g_openlog_stream_stats.flush_calls != 0U ?
+           (g_openlog_stream_stats.flush_total_us / g_openlog_stream_stats.flush_calls) : 0U;
+  openlog_write_decimal(avg_us);
+  openlog_write_text(" max_us=");
+  openlog_write_decimal(g_openlog_stream_stats.flush_max_us);
+
+  openlog_write_text("\r\nwrite calls=");
+  openlog_write_decimal(g_openlog_stream_stats.write_calls);
+  openlog_write_text(" bytes=");
+  openlog_write_decimal(g_openlog_stream_stats.write_bytes);
+  openlog_write_text(" avg_us=");
+  avg_us = g_openlog_stream_stats.write_calls != 0U ?
+           (g_openlog_stream_stats.write_total_us / g_openlog_stream_stats.write_calls) : 0U;
+  openlog_write_decimal(avg_us);
+  openlog_write_text(" max_us=");
+  openlog_write_decimal(g_openlog_stream_stats.write_max_us);
+
+  openlog_write_text("\r\nsync calls=");
+  openlog_write_decimal(g_openlog_stream_stats.sync_calls);
+  openlog_write_text(" avg_us=");
+  avg_us = g_openlog_stream_stats.sync_calls != 0U ?
+           (g_openlog_stream_stats.sync_total_us / g_openlog_stream_stats.sync_calls) : 0U;
+  openlog_write_decimal(avg_us);
+  openlog_write_text(" max_us=");
+  openlog_write_decimal(g_openlog_stream_stats.sync_max_us);
 }
 
 static uint8_t openlog_boot_mode_enter(uint8_t write_prompt)
@@ -849,8 +960,8 @@ static void openlog_handle_stream_byte(uint8_t byte)
 
 static void openlog_print_help(void)
 {
-  openlog_write_text("\r\nnew append write rm size read cat ls md cd sync reset init disk baud set verbose ?");
-  openlog_write_text("\r\necho on|off, verbose on|off, rm/ls support * and ?, set 3=resetlog");
+  openlog_write_text("\r\nnew append write rm size read cat ls md cd sync stats reset init disk baud set verbose ?");
+  openlog_write_text("\r\necho on|off, verbose on|off, rm/ls support * and ?, set 3=resetlog, stats reset");
 }
 
 static void openlog_print_path(void)
@@ -1451,6 +1562,10 @@ static void openlog_process_command(char *line)
       openlog_write_text("\r\nsynced");
     }
   }
+  else if(openlog_text_equal(command, "stats"))
+  {
+    openlog_command_stats(arg1);
+  }
   else if(openlog_text_equal(command, "baud"))
   {
     if(arg1 != NULL)
@@ -1717,6 +1832,7 @@ static void openlog_handle_write_byte(uint8_t byte)
 void openlog_init(void)
 {
   memset(&g_openlog, 0, sizeof(g_openlog));
+  openlog_stream_stats_reset();
   openlog_config_set_defaults();
   openlog_fs_init();
   if(openlog_config_load() == 0U)
@@ -1790,4 +1906,9 @@ void openlog_process(void)
       openlog_enter_command_mode();
     }
   }
+}
+
+uint8_t openlog_record_active(void)
+{
+  return (g_openlog.mode == OPENLOG_MODE_NEWLOG || g_openlog.mode == OPENLOG_MODE_APPEND) ? 1U : 0U;
 }

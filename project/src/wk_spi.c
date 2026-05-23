@@ -298,16 +298,15 @@ static uint8_t wk_spi_transfer_dma_internal(spi_type *spi_x,
   {
   }
 
+  while(spi_i2s_flag_get(spi_x, SPI_I2S_BF_FLAG) != RESET)
+  {
+  }
+
   dma_channel_enable(rx_channel, FALSE);
   dma_channel_enable(tx_channel, FALSE);
   spi_i2s_dma_receiver_enable(spi_x, FALSE);
   spi_i2s_dma_transmitter_enable(spi_x, FALSE);
   dma_flag_clear(rx_flag | tx_flag);
-
-  while(spi_i2s_flag_get(spi_x, SPI_I2S_BF_FLAG) != RESET)
-  {
-  }
-
   return 1U;
 }
 

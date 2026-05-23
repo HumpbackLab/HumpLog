@@ -40,6 +40,10 @@ make -B
 
 - `make host-test`：使用本机 `gcc` 编译并运行 `openlog_fs` 主机测试
 - `make -B`：使用 `arm-none-eabi-gcc` 全量重编译固件，生成 `build/openlog.elf/.hex/.bin`
+- 烧录参考命令：
+```bash
+/home/ncer/at32_openocd/bin/openocd -s /home/ncer/at32_openocd/scripts -f /home/ncer/openlog/openlog/at32f421.cfg -c "program /home/ncer/openlog/openlog/build/openlog.elf verify reset exit
+```
 
 ## 兼容性说明
 
@@ -48,5 +52,7 @@ make -B
 - 高波特率连续记录
 - SD 卡品牌差异
 - 热插拔、满卡、异常断电恢复
+
+当前文件系统路径缓存上限为 `32B`，因此更适合将日志文件直接放在根目录，或仅使用很浅的目录层级；如果目录路径过深，可能导致路径缓存失败。
 
 如果你要继续扩展，建议优先关注真实硬件压测，而不是再单纯增加命令分支。

@@ -365,7 +365,7 @@ uint8_t sd_spi_initialize(void)
     memset(g_sd_cid, 0, sizeof(g_sd_cid));
   }
 
-  wk_spi1_set_clock_div(SPI_MCLK_DIV_8);
+  wk_spi1_set_clock_div(SPI_MCLK_DIV_4);
   g_sd_initialized = 1U;
   return 1U;
 }
