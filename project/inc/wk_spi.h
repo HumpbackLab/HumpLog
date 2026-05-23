@@ -63,6 +63,10 @@ extern "C" {
   /* init spi2 function. */
   void wk_spi2_init(void);
 
+  void wk_spi1_set_clock_div(spi_mclk_freq_div_type divider);
+  void wk_spi1_cs_set(uint8_t asserted);
+  uint8_t wk_spi1_transfer_byte(uint8_t tx_value);
+  uint8_t wk_spi1_transfer(const uint8_t *tx_data, uint8_t *rx_data, uint16_t length);
   uint8_t wk_spi1_transfer_dma(const uint8_t *tx_data, uint8_t *rx_data, uint16_t length);
   uint8_t wk_spi2_transfer_dma(const uint8_t *tx_data, uint8_t *rx_data, uint16_t length);
 

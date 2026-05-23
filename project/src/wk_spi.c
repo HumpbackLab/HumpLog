@@ -26,7 +26,6 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "wk_spi.h"
-#include "wk_usart.h"
 
 static uint8_t g_wk_spi_dma_dummy_tx = 0xFFU;
 static uint8_t g_wk_spi_dma_dummy_rx;
@@ -43,6 +42,7 @@ static uint8_t wk_spi_transfer_blocking_internal(spi_type *spi_x,
                                                  const uint8_t *tx_data,
                                                  uint8_t *rx_data,
                                                  uint16_t length);
+static void wk_spi1_reconfigure(spi_mclk_freq_div_type divider);
 
 /* add user code begin 0 */
 
@@ -96,28 +96,26 @@ void wk_spi1_init(void)
   gpio_init_struct.gpio_pull = GPIO_PULL_NONE;
   gpio_init(GPIOA, &gpio_init_struct);
 
-  /* configure the CS pin */
-  gpio_pin_mux_config(GPIOA, GPIO_PINS_SOURCE4, GPIO_MUX_0);
+  /* configure the CS pin as software-controlled gpio */
   gpio_init_struct.gpio_drive_strength = GPIO_DRIVE_STRENGTH_MODERATE;
   gpio_init_struct.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
-  gpio_init_struct.gpio_mode = GPIO_MODE_MUX;
+  gpio_init_struct.gpio_mode = GPIO_MODE_OUTPUT;
   gpio_init_struct.gpio_pins = GPIO_PINS_4;
   gpio_init_struct.gpio_pull = GPIO_PULL_NONE;
   gpio_init(GPIOA, &gpio_init_struct);
+  gpio_bits_set(GPIOA, GPIO_PINS_4);
 
   /* configure param */
   spi_init_struct.transmission_mode = SPI_TRANSMIT_FULL_DUPLEX;
   spi_init_struct.master_slave_mode = SPI_MODE_MASTER;
   spi_init_struct.frame_bit_num = SPI_FRAME_8BIT;
   spi_init_struct.first_bit_transmission = SPI_FIRST_BIT_MSB;
-  spi_init_struct.mclk_freq_division = SPI_MCLK_DIV_4;
+  spi_init_struct.mclk_freq_division = SPI_MCLK_DIV_256;
   spi_init_struct.clock_polarity = SPI_CLOCK_POLARITY_LOW;
   spi_init_struct.clock_phase = SPI_CLOCK_PHASE_1EDGE;
-  spi_init_struct.cs_mode_selection = SPI_CS_HARDWARE_MODE;
+  spi_init_struct.cs_mode_selection = SPI_CS_SOFTWARE_MODE;
   spi_init(SPI1, &spi_init_struct);
-
-  /* configure the cs pin output */
-  spi_hardware_cs_output_enable(SPI1, TRUE);
+  spi_software_cs_internal_level_set(SPI1, SPI_SWCS_INTERNAL_LEVEL_HIGHT);
 
   /* add user code begin spi1_init 2 */
 
@@ -210,6 +208,37 @@ void wk_spi2_init(void)
   /* add user code begin spi2_init 3 */
 
   /* add user code end spi2_init 3 */
+}
+
+void wk_spi1_set_clock_div(spi_mclk_freq_div_type divider)
+{
+  wk_spi1_reconfigure(divider);
+}
+
+void wk_spi1_cs_set(uint8_t asserted)
+{
+  if(asserted != 0U)
+  {
+    gpio_bits_reset(GPIOA, GPIO_PINS_4);
+  }
+  else
+  {
+    gpio_bits_set(GPIOA, GPIO_PINS_4);
+  }
+}
+
+uint8_t wk_spi1_transfer_byte(uint8_t tx_value)
+{
+  uint8_t rx_value;
+
+  rx_value = 0xFFU;
+  (void)wk_spi_transfer_blocking_internal(SPI1, &tx_value, &rx_value, 1U);
+  return rx_value;
+}
+
+uint8_t wk_spi1_transfer(const uint8_t *tx_data, uint8_t *rx_data, uint16_t length)
+{
+  return wk_spi_transfer_blocking_internal(SPI1, tx_data, rx_data, length);
 }
 
 static uint8_t wk_spi_transfer_dma_internal(spi_type *spi_x,
@@ -329,6 +358,25 @@ static uint8_t wk_spi_transfer_blocking_internal(spi_type *spi_x,
   }
 
   return 1U;
+}
+
+static void wk_spi1_reconfigure(spi_mclk_freq_div_type divider)
+{
+  spi_init_type spi_init_struct;
+
+  spi_enable(SPI1, FALSE);
+  spi_default_para_init(&spi_init_struct);
+  spi_init_struct.transmission_mode = SPI_TRANSMIT_FULL_DUPLEX;
+  spi_init_struct.master_slave_mode = SPI_MODE_MASTER;
+  spi_init_struct.frame_bit_num = SPI_FRAME_8BIT;
+  spi_init_struct.first_bit_transmission = SPI_FIRST_BIT_MSB;
+  spi_init_struct.mclk_freq_division = divider;
+  spi_init_struct.clock_polarity = SPI_CLOCK_POLARITY_LOW;
+  spi_init_struct.clock_phase = SPI_CLOCK_PHASE_1EDGE;
+  spi_init_struct.cs_mode_selection = SPI_CS_SOFTWARE_MODE;
+  spi_init(SPI1, &spi_init_struct);
+  spi_software_cs_internal_level_set(SPI1, SPI_SWCS_INTERNAL_LEVEL_HIGHT);
+  spi_enable(SPI1, TRUE);
 }
 
 /* add user code begin 1 */

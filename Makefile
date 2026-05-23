@@ -35,6 +35,8 @@ C_SOURCES = \
 project/src/main.c \
 project/src/openlog.c \
 project/src/openlog_fs.c \
+project/src/sd_spi.c \
+project/src/diskio.c \
 project/src/syscalls.c \
 project/src/sysmem.c \
 project/src/at32f421_wk_config.c \
@@ -43,6 +45,7 @@ project/src/wk_system.c \
 project/src/wk_spi.c \
 project/src/wk_usart.c \
 libraries/cmsis/cm4/device_support/system_at32f421.c \
+third_party/FatFs/src/ff.c \
 libraries/drivers/src/at32f421_crm.c \
 libraries/drivers/src/at32f421_cmp.c \
 libraries/drivers/src/at32f421_tmr.c \
@@ -123,6 +126,7 @@ AS_INCLUDES =
 # C includes
 C_INCLUDES = \
 -Iproject/inc \
+-Ithird_party/FatFs/src \
 -Ilibraries/drivers/inc \
 -Ilibraries/cmsis/cm4/core_support \
 -Ilibraries/cmsis/cm4/device_support \
@@ -200,7 +204,7 @@ host-test: tests/openlog_fs_test
 	./tests/openlog_fs_test
 
 tests/openlog_fs_test: tests/openlog_fs_test.c project/src/openlog_fs.c project/inc/openlog_fs.h
-	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -Iproject/inc tests/openlog_fs_test.c project/src/openlog_fs.c -o $@
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -DOPENLOG_FS_USE_RAMDISK_TEST -Iproject/inc tests/openlog_fs_test.c project/src/openlog_fs.c -o $@
   
 #######################################
 # dependencies

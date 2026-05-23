@@ -36,7 +36,7 @@ typedef struct
   uint8_t write_line_length;
   uint8_t ignore_lf;
   uint8_t write_ignore_lf;
-  uint16_t write_offset;
+  uint32_t write_offset;
   uint32_t log_sequence;
   char line_buffer[OPENLOG_LINE_BUFFER_SIZE + 1U];
   char write_line_buffer[OPENLOG_WRITE_LINE_BUFFER_SIZE + 1U];
@@ -229,7 +229,7 @@ static void openlog_handle_stream_byte(uint8_t byte)
 static void openlog_print_help(void)
 {
   openlog_write_text("\r\nnew append write rm size read cat ls md cd sync reset ?");
-  openlog_write_text("\r\ndisk baud init not supported in RAM backend");
+  openlog_write_text("\r\ndisk available, baud/init unsupported");
 }
 
 static void openlog_print_path(void)
@@ -276,6 +276,7 @@ static void openlog_command_ls(void)
   uint8_t found;
   const openlog_fs_node_t *node;
 
+  openlog_fs_refresh_dir(g_openlog.current_dir);
   found = 0U;
   for(index = 0U; index < OPENLOG_FS_MAX_NODES; ++index)
   {
@@ -303,13 +304,14 @@ static void openlog_command_ls(void)
 static void openlog_command_read(uint8_t node_id, uint32_t start, uint32_t length, uint32_t type)
 {
   const openlog_fs_node_t *node;
-  const uint8_t *data;
+  uint8_t byte_buffer[16];
+  int32_t bytes_read;
   uint32_t index;
   uint32_t end;
+  uint32_t remaining;
 
   node = openlog_fs_node_get(node_id);
-  data = openlog_fs_data(node_id);
-  if(node == NULL || data == NULL)
+  if(node == NULL || node->is_dir != 0U)
   {
     openlog_write_text("\r\nerror: not a file");
     return;
@@ -329,29 +331,55 @@ static void openlog_command_read(uint8_t node_id, uint32_t start, uint32_t lengt
   openlog_write_crlf();
   if(type == 2U)
   {
-    for(index = start; index < end; ++index)
+    remaining = end - start;
+    while(remaining > 0U)
     {
-      if(index > start)
+      bytes_read = openlog_fs_read(node_id,
+                                   start + (end - start - remaining),
+                                   byte_buffer,
+                                   remaining > sizeof(byte_buffer) ? sizeof(byte_buffer) : (uint16_t)remaining);
+      if(bytes_read <= 0)
       {
-        openlog_write_text(" ");
+        return;
       }
-      openlog_write_hex_byte(data[index]);
+      for(index = 0U; index < (uint32_t)bytes_read; ++index)
+      {
+        if((start + (end - start - remaining) + index) > start)
+        {
+          openlog_write_text(" ");
+        }
+        openlog_write_hex_byte(byte_buffer[index]);
+      }
+      remaining -= (uint32_t)bytes_read;
     }
     return;
   }
 
-  openlog_write_bytes(&data[start], (uint16_t)(end - start));
+  remaining = end - start;
+  while(remaining > 0U)
+  {
+    bytes_read = openlog_fs_read(node_id,
+                                 start + (end - start - remaining),
+                                 byte_buffer,
+                                 remaining > sizeof(byte_buffer) ? sizeof(byte_buffer) : (uint16_t)remaining);
+    if(bytes_read <= 0)
+    {
+      return;
+    }
+    openlog_write_bytes(byte_buffer, (uint16_t)bytes_read);
+    remaining -= (uint32_t)bytes_read;
+  }
 }
 
 static void openlog_command_cat(uint8_t node_id)
 {
   const openlog_fs_node_t *node;
-  const uint8_t *data;
+  uint8_t data_byte;
+  int32_t bytes_read;
   uint16_t index;
 
   node = openlog_fs_node_get(node_id);
-  data = openlog_fs_data(node_id);
-  if(node == NULL || data == NULL)
+  if(node == NULL || node->is_dir != 0U)
   {
     openlog_write_text("\r\nerror: not a file");
     return;
@@ -370,7 +398,12 @@ static void openlog_command_cat(uint8_t node_id)
     {
       openlog_write_text(" ");
     }
-    openlog_write_hex_byte(data[index]);
+    bytes_read = openlog_fs_read(node_id, index, &data_byte, 1U);
+    if(bytes_read != 1)
+    {
+      return;
+    }
+    openlog_write_hex_byte(data_byte);
   }
 }
 
@@ -390,7 +423,7 @@ static void openlog_start_append(const char *name)
   g_openlog.escape_count = 0U;
 }
 
-static void openlog_start_write(const char *name, uint16_t offset)
+static void openlog_start_write(const char *name, uint32_t offset)
 {
   int8_t node_id;
 
@@ -461,7 +494,7 @@ static void openlog_process_command(char *line)
   }
   else if(openlog_text_equal(command, "write"))
   {
-    uint16_t offset = 0U;
+    uint32_t offset = 0U;
 
     if(arg1 == NULL)
     {
@@ -623,7 +656,7 @@ static void openlog_process_command(char *line)
   }
   else if(openlog_text_equal(command, "disk"))
   {
-    openlog_write_text("\r\nRAMFS ");
+    openlog_write_text("\r\nSD ");
     openlog_write_decimal(openlog_fs_used_bytes());
     openlog_write_text("/");
     openlog_write_decimal(openlog_fs_total_bytes());

@@ -1,0 +1,100 @@
+#include "diskio.h"
+#include "sd_spi.h"
+
+#define SD_DRIVE_NUMBER 0U
+
+DSTATUS disk_initialize(BYTE pdrv)
+{
+  if(pdrv != SD_DRIVE_NUMBER)
+  {
+    return STA_NOINIT;
+  }
+
+  return sd_spi_initialize() != 0U ? 0U : STA_NOINIT;
+}
+
+DSTATUS disk_status(BYTE pdrv)
+{
+  if(pdrv != SD_DRIVE_NUMBER)
+  {
+    return STA_NOINIT;
+  }
+
+  return sd_spi_is_initialized() != 0U ? 0U : STA_NOINIT;
+}
+
+DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
+{
+  if(pdrv != SD_DRIVE_NUMBER || buff == 0 || count == 0U)
+  {
+    return RES_PARERR;
+  }
+
+  if(sd_spi_read_blocks((uint32_t)sector, buff, count) == 0U)
+  {
+    return RES_ERROR;
+  }
+
+  return RES_OK;
+}
+
+DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
+{
+  if(pdrv != SD_DRIVE_NUMBER || buff == 0 || count == 0U)
+  {
+    return RES_PARERR;
+  }
+
+  if(sd_spi_write_blocks((uint32_t)sector, buff, count) == 0U)
+  {
+    return RES_ERROR;
+  }
+
+  return RES_OK;
+}
+
+DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
+{
+  uint32_t sector_count;
+  uint16_t sector_size;
+  uint32_t erase_block_size;
+
+  if(pdrv != SD_DRIVE_NUMBER)
+  {
+    return RES_PARERR;
+  }
+
+  switch(cmd)
+  {
+    case CTRL_SYNC:
+      sd_spi_sync();
+      return RES_OK;
+
+    case GET_SECTOR_COUNT:
+      if(buff == 0 || sd_spi_get_sector_count(&sector_count) == 0U)
+      {
+        return RES_ERROR;
+      }
+      *(DWORD *)buff = sector_count;
+      return RES_OK;
+
+    case GET_SECTOR_SIZE:
+      if(buff == 0 || sd_spi_get_sector_size(&sector_size) == 0U)
+      {
+        return RES_ERROR;
+      }
+      *(WORD *)buff = sector_size;
+      return RES_OK;
+
+    case GET_BLOCK_SIZE:
+      if(buff == 0 || sd_spi_get_erase_block_size(&erase_block_size) == 0U)
+      {
+        return RES_ERROR;
+      }
+      *(DWORD *)buff = erase_block_size;
+      return RES_OK;
+
+    default:
+      return RES_PARERR;
+  }
+}
