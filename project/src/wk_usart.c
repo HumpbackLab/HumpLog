@@ -27,12 +27,16 @@
 /* Includes ------------------------------------------------------------------*/
 #include "wk_usart.h"
 #include <stddef.h>
+#include <string.h>
 
 #define WK_USART1_RX_DMA_BUFFER_SIZE 1536U
 #define WK_USART1_TX_DMA_BUFFER_SIZE 768U
 
 static volatile uint8_t g_wk_usart1_rx_dma_buffer[WK_USART1_RX_DMA_BUFFER_SIZE];
 static volatile uint16_t g_wk_usart1_rx_read_index;
+static volatile uint32_t g_wk_usart1_rx_wrap_count;
+static volatile uint32_t g_wk_usart1_rx_total_read_count;
+static volatile uint32_t g_wk_usart1_rx_overrun_count;
 static volatile uint8_t g_wk_usart1_tx_dma_buffer[WK_USART1_TX_DMA_BUFFER_SIZE];
 static volatile uint16_t g_wk_usart1_tx_read_index;
 static volatile uint16_t g_wk_usart1_tx_write_index;
@@ -44,7 +48,10 @@ static void wk_usart1_rx_dma_config(void);
 static void wk_usart1_tx_dma_channel_reset(void);
 static void wk_usart1_tx_kick_locked(void);
 static uint16_t wk_usart1_rx_dma_write_index_get(void);
+static uint32_t wk_usart1_rx_total_written_get(uint16_t *write_index);
+static void wk_usart1_rx_sync(void);
 static uint16_t wk_usart1_tx_free_space_get(void);
+static void wk_usart1_rx_state_reset(void);
 
 /* add user code begin 0 */
 
@@ -102,6 +109,7 @@ void wk_usart1_init(void)
   /* add user code end usart1_init 2 */
   
   usart_enable(USART1, TRUE);
+  wk_usart1_rx_state_reset();
   wk_usart1_rx_dma_config();
   wk_usart1_tx_dma_channel_reset();
   usart_dma_receiver_enable(USART1, TRUE);
@@ -114,6 +122,7 @@ void wk_usart1_init(void)
 void wk_usart1_set_baud(uint32_t baud_rate)
 {
   wk_usart1_dma_suspend();
+  wk_usart1_rx_state_reset();
   usart_enable(USART1, FALSE);
   usart_init(USART1, baud_rate, USART_DATA_8BITS, USART_STOP_1_BIT);
   usart_transmitter_enable(USART1, TRUE);
@@ -122,6 +131,15 @@ void wk_usart1_set_baud(uint32_t baud_rate)
   usart_hardware_flow_control_set(USART1, USART_HARDWARE_FLOW_NONE);
   usart_enable(USART1, TRUE);
   wk_usart1_dma_resume();
+}
+
+static void wk_usart1_rx_state_reset(void)
+{
+  memset((void *)g_wk_usart1_rx_dma_buffer, 0, sizeof(g_wk_usart1_rx_dma_buffer));
+  g_wk_usart1_rx_read_index = 0U;
+  g_wk_usart1_rx_wrap_count = 0U;
+  g_wk_usart1_rx_total_read_count = 0U;
+  g_wk_usart1_rx_overrun_count = 0U;
 }
 
 static void wk_usart1_rx_dma_config(void)
@@ -141,6 +159,8 @@ static void wk_usart1_rx_dma_config(void)
   dma_init_struct.loop_mode_enable = TRUE;
   dma_init_struct.priority = DMA_PRIORITY_HIGH;
   dma_init(DMA1_CHANNEL5, &dma_init_struct);
+  dma_flag_clear(DMA1_GL5_FLAG);
+  dma_interrupt_enable(DMA1_CHANNEL5, DMA_FDT_INT | DMA_DTERR_INT, TRUE);
   dma_channel_enable(DMA1_CHANNEL5, TRUE);
 }
 
@@ -155,6 +175,48 @@ static uint16_t wk_usart1_rx_dma_write_index_get(void)
 {
   return (uint16_t)(WK_USART1_RX_DMA_BUFFER_SIZE - dma_data_number_get(DMA1_CHANNEL5)) %
          WK_USART1_RX_DMA_BUFFER_SIZE;
+}
+
+static uint32_t wk_usart1_rx_total_written_get(uint16_t *write_index)
+{
+  uint32_t wrap_count_before;
+  uint32_t wrap_count_after;
+  uint16_t current_write_index;
+
+  do
+  {
+    wrap_count_before = g_wk_usart1_rx_wrap_count;
+    current_write_index = wk_usart1_rx_dma_write_index_get();
+    wrap_count_after = g_wk_usart1_rx_wrap_count;
+  }
+  while(wrap_count_before != wrap_count_after);
+
+  if(write_index != NULL)
+  {
+    *write_index = current_write_index;
+  }
+
+  return wrap_count_before + current_write_index;
+}
+
+static void wk_usart1_rx_sync(void)
+{
+  uint16_t current_write_index;
+  uint32_t total_written;
+  uint32_t unread;
+  uint32_t dropped;
+
+  total_written = wk_usart1_rx_total_written_get(&current_write_index);
+  unread = total_written - g_wk_usart1_rx_total_read_count;
+  if(unread <= WK_USART1_RX_DMA_BUFFER_SIZE)
+  {
+    return;
+  }
+
+  dropped = unread - WK_USART1_RX_DMA_BUFFER_SIZE;
+  g_wk_usart1_rx_overrun_count += dropped;
+  g_wk_usart1_rx_total_read_count += dropped;
+  g_wk_usart1_rx_read_index = current_write_index;
 }
 
 static uint16_t wk_usart1_tx_free_space_get(void)
@@ -219,7 +281,8 @@ static void wk_usart1_tx_kick_locked(void)
 
 uint8_t wk_usart1_readable(void)
 {
-  return wk_usart1_rx_dma_write_index_get() != g_wk_usart1_rx_read_index ? 1U : 0U;
+  wk_usart1_rx_sync();
+  return wk_usart1_rx_total_written_get(NULL) != g_wk_usart1_rx_total_read_count ? 1U : 0U;
 }
 
 uint8_t wk_usart1_read_byte(void)
@@ -232,7 +295,27 @@ uint8_t wk_usart1_read_byte(void)
 
   value = g_wk_usart1_rx_dma_buffer[g_wk_usart1_rx_read_index];
   g_wk_usart1_rx_read_index = (uint16_t)((g_wk_usart1_rx_read_index + 1U) % WK_USART1_RX_DMA_BUFFER_SIZE);
+  ++g_wk_usart1_rx_total_read_count;
   return value;
+}
+
+void wk_usart1_discard_rx(void)
+{
+  uint16_t current_write_index;
+
+  g_wk_usart1_rx_total_read_count = wk_usart1_rx_total_written_get(&current_write_index);
+  g_wk_usart1_rx_read_index = current_write_index;
+}
+
+uint32_t wk_usart1_rx_overrun_bytes(void)
+{
+  wk_usart1_rx_sync();
+  return g_wk_usart1_rx_overrun_count;
+}
+
+void wk_usart1_rx_overrun_clear(void)
+{
+  g_wk_usart1_rx_overrun_count = 0U;
 }
 
 void wk_usart1_write_byte(uint8_t byte)
@@ -309,6 +392,7 @@ void wk_usart1_dma_resume(void)
     return;
   }
 
+  wk_usart1_rx_state_reset();
   wk_usart1_rx_dma_config();
   wk_usart1_tx_dma_channel_reset();
   usart_dma_receiver_enable(USART1, TRUE);
@@ -318,6 +402,17 @@ void wk_usart1_dma_resume(void)
 
 void wk_usart1_dma_irq_handler(void)
 {
+  if(dma_interrupt_flag_get(DMA1_FDT5_FLAG) != RESET)
+  {
+    dma_flag_clear(DMA1_GL5_FLAG);
+    g_wk_usart1_rx_wrap_count += WK_USART1_RX_DMA_BUFFER_SIZE;
+  }
+
+  if(dma_interrupt_flag_get(DMA1_DTERR5_FLAG) != RESET)
+  {
+    dma_flag_clear(DMA1_GL5_FLAG);
+  }
+
   if(dma_interrupt_flag_get(DMA1_FDT4_FLAG) != RESET)
   {
     dma_channel_enable(DMA1_CHANNEL4, FALSE);

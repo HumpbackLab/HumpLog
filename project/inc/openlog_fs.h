@@ -44,6 +44,10 @@ int32_t openlog_fs_read(uint8_t node_id, uint32_t offset, uint8_t *data, uint16_
 int8_t openlog_fs_write(uint8_t node_id, uint32_t offset, const uint8_t *data, uint16_t length);
 int8_t openlog_fs_append(uint8_t node_id, const uint8_t *data, uint16_t length);
 int8_t openlog_fs_truncate(uint8_t node_id, uint32_t size);
+int8_t openlog_fs_stream_begin(uint8_t node_id, uint32_t offset);
+int8_t openlog_fs_stream_write(const uint8_t *data, uint16_t length);
+int8_t openlog_fs_stream_sync(void);
+int8_t openlog_fs_stream_end(void);
 const uint8_t *openlog_fs_data(uint8_t node_id);
 uint32_t openlog_fs_capacity(uint8_t node_id);
 uint32_t openlog_fs_used_bytes(void);

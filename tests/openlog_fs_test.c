@@ -141,6 +141,23 @@ static void test_limits(void)
   expect_int(openlog_fs_write((uint8_t)file_id, OPENLOG_FS_FILE_CAPACITY, (const uint8_t *)"X", 1U), -1, "write past capacity should fail");
 }
 
+static void test_stream_write(void)
+{
+  int8_t file_id;
+  uint8_t buffer[6];
+
+  openlog_fs_init();
+  file_id = openlog_fs_create_file(openlog_fs_root(), "STREAM.TXT", 1U);
+  expect_true(file_id >= 0, "stream file should be created");
+  expect_int(openlog_fs_stream_begin((uint8_t)file_id, 0U), 0, "stream begin should pass");
+  expect_int(openlog_fs_stream_write((const uint8_t *)"abc", 3U), 0, "stream first write should pass");
+  expect_int(openlog_fs_stream_write((const uint8_t *)"def", 3U), 0, "stream second write should pass");
+  expect_int(openlog_fs_stream_sync(), 0, "stream sync should pass");
+  expect_int(openlog_fs_stream_end(), 0, "stream end should pass");
+  expect_int(openlog_fs_read((uint8_t)file_id, 0U, buffer, sizeof(buffer)), (int)sizeof(buffer), "stream readback should pass");
+  expect_mem(buffer, "abcdef", sizeof(buffer), "stream contents should match");
+}
+
 typedef struct
 {
   uint8_t count;
@@ -190,6 +207,7 @@ int main(void)
   test_write_append_and_sparse();
   test_truncate_and_delete();
   test_limits();
+  test_stream_write();
   test_iterate_dir();
 
   puts("openlog_fs tests passed");

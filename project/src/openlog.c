@@ -19,6 +19,7 @@
 #define OPENLOG_LINE_BUFFER_SIZE 80U
 #define OPENLOG_WRITE_LINE_BUFFER_SIZE 80U
 #define OPENLOG_STREAM_BUFFER_SIZE 768U
+#define OPENLOG_STREAM_BUFFER_COUNT 2U
 #define OPENLOG_STREAM_FLUSH_IDLE_US 20000U
 #define OPENLOG_CONFIG_FILE "config.txt"
 
@@ -56,9 +57,11 @@ typedef struct
   uint8_t current_dir;
   uint8_t active_file;
   uint8_t escape_count;
+  uint8_t stream_active_index;
+  uint8_t stream_overrun_latched;
   uint8_t line_length;
   uint8_t write_line_length;
-  uint16_t stream_length;
+  uint16_t stream_length[OPENLOG_STREAM_BUFFER_COUNT];
   uint8_t ignore_lf;
   uint8_t write_ignore_lf;
   uint32_t write_offset;
@@ -67,7 +70,7 @@ typedef struct
   uint32_t log_sequence;
   char line_buffer[OPENLOG_LINE_BUFFER_SIZE + 1U];
   char write_line_buffer[OPENLOG_WRITE_LINE_BUFFER_SIZE + 1U];
-  uint8_t stream_buffer[OPENLOG_STREAM_BUFFER_SIZE];
+  uint8_t stream_buffer[OPENLOG_STREAM_BUFFER_COUNT][OPENLOG_STREAM_BUFFER_SIZE];
 } openlog_context_t;
 
 static openlog_context_t g_openlog;
@@ -86,6 +89,9 @@ static uint8_t openlog_stream_flush(void);
 static uint8_t openlog_stream_queue_byte(uint8_t byte);
 static void openlog_stream_start(uint8_t node_id, openlog_mode_t mode);
 static void openlog_stream_stop(void);
+static uint8_t openlog_stream_flush_pending(void);
+static uint8_t openlog_stream_commit_active(void);
+static void openlog_reset_runtime_state(void);
 static void openlog_write_prompt_for_mode(void);
 static void openlog_report_error(const char *message);
 static uint8_t openlog_wildcard_match(const char *pattern, const char *text);
@@ -549,21 +555,65 @@ static uint8_t openlog_start_sequential_log(void)
 static uint8_t openlog_stream_flush(void)
 {
   if((g_openlog.mode != OPENLOG_MODE_NEWLOG && g_openlog.mode != OPENLOG_MODE_APPEND) ||
-     g_openlog.stream_length == 0U)
+     (g_openlog.stream_length[0] == 0U && g_openlog.stream_length[1] == 0U))
   {
     return 1U;
   }
 
-  if(openlog_fs_write(g_openlog.active_file,
-                      g_openlog.stream_offset,
-                      g_openlog.stream_buffer,
-                      g_openlog.stream_length) != 0)
+  if(openlog_stream_commit_active() == 0U)
   {
     return 0U;
   }
 
-  g_openlog.stream_offset += g_openlog.stream_length;
-  g_openlog.stream_length = 0U;
+  if(openlog_stream_flush_pending() == 0U)
+  {
+    return 0U;
+  }
+
+  return openlog_fs_stream_sync() == 0 ? 1U : 0U;
+}
+
+static uint8_t openlog_stream_flush_pending(void)
+{
+  uint8_t pending_index;
+  uint16_t pending_length;
+
+  pending_index = (uint8_t)(g_openlog.stream_active_index ^ 1U);
+  pending_length = g_openlog.stream_length[pending_index];
+  if(pending_length == 0U)
+  {
+    return 1U;
+  }
+
+  if(openlog_fs_stream_write(g_openlog.stream_buffer[pending_index], pending_length) != 0)
+  {
+    return 0U;
+  }
+
+  g_openlog.stream_offset += pending_length;
+  g_openlog.stream_length[pending_index] = 0U;
+  return 1U;
+}
+
+static uint8_t openlog_stream_commit_active(void)
+{
+  uint8_t active_index;
+  uint8_t pending_index;
+
+  active_index = g_openlog.stream_active_index;
+  if(g_openlog.stream_length[active_index] == 0U)
+  {
+    return 1U;
+  }
+
+  pending_index = (uint8_t)(active_index ^ 1U);
+  if(g_openlog.stream_length[pending_index] != 0U &&
+     openlog_stream_flush_pending() == 0U)
+  {
+    return 0U;
+  }
+
+  g_openlog.stream_active_index = pending_index;
   return 1U;
 }
 
@@ -574,32 +624,57 @@ static void openlog_stream_start(uint8_t node_id, openlog_mode_t mode)
   g_openlog.active_file = node_id;
   g_openlog.mode = mode;
   g_openlog.escape_count = 0U;
-  g_openlog.stream_length = 0U;
+  g_openlog.stream_active_index = 0U;
+  g_openlog.stream_length[0] = 0U;
+  g_openlog.stream_length[1] = 0U;
+  g_openlog.stream_overrun_latched = 0U;
   node = openlog_fs_node_get(node_id);
   g_openlog.stream_offset = node != NULL ? node->size : 0U;
   g_openlog.stream_last_tick = wk_timebase_raw_tick();
+  wk_usart1_rx_overrun_clear();
+  if(openlog_fs_stream_begin(node_id, g_openlog.stream_offset) != 0)
+  {
+    g_openlog.mode = OPENLOG_MODE_COMMAND;
+  }
 }
 
 static void openlog_stream_stop(void)
 {
-  if(openlog_stream_flush() == 0U)
+  uint8_t flush_ok;
+
+  flush_ok = openlog_stream_flush();
+  if(openlog_fs_stream_end() != 0)
+  {
+    flush_ok = 0U;
+  }
+
+  if(flush_ok == 0U)
   {
     openlog_report_error("error: storage full");
   }
-  g_openlog.stream_length = 0U;
+  if(wk_usart1_rx_overrun_bytes() != 0U)
+  {
+    g_openlog.stream_overrun_latched = 1U;
+  }
+  g_openlog.stream_length[0] = 0U;
+  g_openlog.stream_length[1] = 0U;
 }
 
 static uint8_t openlog_stream_queue_byte(uint8_t byte)
 {
-  if(g_openlog.stream_length >= OPENLOG_STREAM_BUFFER_SIZE)
+  uint8_t active_index;
+
+  active_index = g_openlog.stream_active_index;
+  if(g_openlog.stream_length[active_index] >= OPENLOG_STREAM_BUFFER_SIZE)
   {
-    if(openlog_stream_flush() == 0U)
+    if(openlog_stream_commit_active() == 0U)
     {
       return 0U;
     }
+    active_index = g_openlog.stream_active_index;
   }
 
-  g_openlog.stream_buffer[g_openlog.stream_length++] = byte;
+  g_openlog.stream_buffer[active_index][g_openlog.stream_length[active_index]++] = byte;
   g_openlog.stream_last_tick = wk_timebase_raw_tick();
   return 1U;
 }
@@ -613,20 +688,38 @@ static void openlog_enter_command_mode(void)
   g_openlog.mode = OPENLOG_MODE_COMMAND;
   g_openlog.escape_count = 0U;
   g_openlog.line_length = 0U;
+  if(g_openlog.stream_overrun_latched != 0U)
+  {
+    g_openlog.stream_overrun_latched = 0U;
+    openlog_report_error("error: rx overrun");
+  }
   openlog_write_prompt_line();
+}
+
+static void openlog_reset_runtime_state(void)
+{
+  g_openlog.current_dir = openlog_fs_root();
+  g_openlog.active_file = openlog_fs_root();
+  g_openlog.escape_count = 0U;
+  g_openlog.stream_active_index = 0U;
+  g_openlog.stream_overrun_latched = 0U;
+  g_openlog.line_length = 0U;
+  g_openlog.write_line_length = 0U;
+  g_openlog.stream_length[0] = 0U;
+  g_openlog.stream_length[1] = 0U;
+  g_openlog.ignore_lf = 0U;
+  g_openlog.write_ignore_lf = 0U;
+  g_openlog.write_offset = 0U;
+  g_openlog.stream_offset = 0U;
+  g_openlog.stream_last_tick = wk_timebase_raw_tick();
+  memset(g_openlog.line_buffer, 0, sizeof(g_openlog.line_buffer));
+  memset(g_openlog.write_line_buffer, 0, sizeof(g_openlog.write_line_buffer));
 }
 
 static uint8_t openlog_boot_mode_enter(uint8_t write_prompt)
 {
   openlog_update_log_sequence();
-  g_openlog.current_dir = openlog_fs_root();
-  g_openlog.escape_count = 0U;
-  g_openlog.line_length = 0U;
-  g_openlog.write_line_length = 0U;
-  g_openlog.stream_length = 0U;
-  g_openlog.ignore_lf = 0U;
-  g_openlog.write_ignore_lf = 0U;
-  g_openlog.write_offset = 0U;
+  openlog_reset_runtime_state();
 
   switch(g_openlog_config.boot_mode)
   {
@@ -644,6 +737,16 @@ static uint8_t openlog_boot_mode_enter(uint8_t write_prompt)
         return 0U;
       }
       openlog_stream_start(g_openlog.active_file, OPENLOG_MODE_NEWLOG);
+      if(g_openlog.mode == OPENLOG_MODE_COMMAND)
+      {
+        if(write_prompt != 0U)
+        {
+          openlog_write_prompt_for_mode();
+          openlog_report_error("error: cannot open log stream");
+          openlog_write_prompt_line();
+        }
+        return 0U;
+      }
       if(write_prompt != 0U)
       {
         openlog_write_prompt(OPENLOG_PROMPT_RECORD);
@@ -696,15 +799,12 @@ static uint8_t openlog_reinitialize(uint8_t write_prompt, uint8_t force_command_
   {
     wk_usart1_set_baud(115200U);
   }
+  wk_usart1_discard_rx();
+  openlog_update_log_sequence();
   if(force_command_mode != 0U)
   {
     g_openlog.mode = OPENLOG_MODE_COMMAND;
-    g_openlog.current_dir = openlog_fs_root();
-    g_openlog.escape_count = 0U;
-    g_openlog.line_length = 0U;
-    g_openlog.write_line_length = 0U;
-    g_openlog.ignore_lf = 0U;
-    g_openlog.write_ignore_lf = 0U;
+    openlog_reset_runtime_state();
     if(write_prompt != 0U)
     {
       openlog_write_prompt(OPENLOG_PROMPT_COMMAND);
@@ -1064,6 +1164,7 @@ static void openlog_handle_menu_line(char *line)
     wk_usart1_flush();
     wk_delay_ms(20U);
     wk_usart1_set_baud(baud_rate);
+    wk_usart1_discard_rx();
     g_openlog.mode = OPENLOG_MODE_COMMAND;
     openlog_write_prompt_line();
     return;
@@ -1166,6 +1267,10 @@ static void openlog_process_command(char *line)
     else
     {
       openlog_start_append(arg1);
+      if(g_openlog.mode == OPENLOG_MODE_COMMAND)
+      {
+        openlog_write_prompt_line();
+      }
       return;
     }
   }
@@ -1659,7 +1764,24 @@ void openlog_process(void)
   }
 
   if((g_openlog.mode == OPENLOG_MODE_NEWLOG || g_openlog.mode == OPENLOG_MODE_APPEND) &&
-     g_openlog.stream_length != 0U &&
+     wk_usart1_rx_overrun_bytes() != 0U)
+  {
+    g_openlog.stream_overrun_latched = 1U;
+  }
+
+  if((g_openlog.mode == OPENLOG_MODE_NEWLOG || g_openlog.mode == OPENLOG_MODE_APPEND) &&
+     wk_usart1_readable() == 0U)
+  {
+    if(openlog_stream_flush_pending() == 0U)
+    {
+      openlog_report_error("error: storage full");
+      openlog_enter_command_mode();
+      return;
+    }
+  }
+
+  if((g_openlog.mode == OPENLOG_MODE_NEWLOG || g_openlog.mode == OPENLOG_MODE_APPEND) &&
+     (g_openlog.stream_length[0] != 0U || g_openlog.stream_length[1] != 0U) &&
      wk_timebase_elapsed_us(g_openlog.stream_last_tick) >= OPENLOG_STREAM_FLUSH_IDLE_US)
   {
     if(openlog_stream_flush() == 0U)

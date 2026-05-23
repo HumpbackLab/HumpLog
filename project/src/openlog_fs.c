@@ -11,6 +11,9 @@
 static openlog_fs_node_t g_nodes[OPENLOG_FS_MAX_NODES];
 static uint8_t g_file_storage[OPENLOG_FS_MAX_FILE_SLOTS][OPENLOG_FS_FILE_CAPACITY];
 static uint8_t g_slot_in_use[OPENLOG_FS_MAX_FILE_SLOTS];
+static uint8_t g_stream_open;
+static uint8_t g_stream_node_id;
+static uint32_t g_stream_offset;
 
 static uint8_t openlog_fs_char_equal(char left, char right)
 {
@@ -101,6 +104,9 @@ void openlog_fs_init(void)
   memset(g_nodes, 0, sizeof(g_nodes));
   memset(g_file_storage, 0, sizeof(g_file_storage));
   memset(g_slot_in_use, 0, sizeof(g_slot_in_use));
+  g_stream_open = 0U;
+  g_stream_node_id = OPENLOG_FS_ROOT_ID;
+  g_stream_offset = 0U;
 
   g_nodes[OPENLOG_FS_ROOT_ID].used = 1U;
   g_nodes[OPENLOG_FS_ROOT_ID].is_dir = 1U;
@@ -433,6 +439,53 @@ int8_t openlog_fs_append(uint8_t node_id, const uint8_t *data, uint16_t length)
   return openlog_fs_write(node_id, g_nodes[node_id].size, data, length);
 }
 
+int8_t openlog_fs_stream_begin(uint8_t node_id, uint32_t offset)
+{
+  if(!openlog_fs_node_valid(node_id) || g_nodes[node_id].is_dir != 0U)
+  {
+    return -1;
+  }
+
+  g_stream_open = 1U;
+  g_stream_node_id = node_id;
+  g_stream_offset = offset;
+  return 0;
+}
+
+int8_t openlog_fs_stream_write(const uint8_t *data, uint16_t length)
+{
+  if(g_stream_open == 0U)
+  {
+    return -1;
+  }
+
+  if(openlog_fs_write(g_stream_node_id, g_stream_offset, data, length) != 0)
+  {
+    return -1;
+  }
+
+  g_stream_offset += length;
+  return 0;
+}
+
+int8_t openlog_fs_stream_sync(void)
+{
+  return g_stream_open != 0U ? 0 : -1;
+}
+
+int8_t openlog_fs_stream_end(void)
+{
+  if(g_stream_open == 0U)
+  {
+    return -1;
+  }
+
+  g_stream_open = 0U;
+  g_stream_node_id = OPENLOG_FS_ROOT_ID;
+  g_stream_offset = 0U;
+  return 0;
+}
+
 const uint8_t *openlog_fs_data(uint8_t node_id)
 {
   if(!openlog_fs_node_valid(node_id) || g_nodes[node_id].is_dir != 0U)
@@ -486,6 +539,10 @@ uint32_t openlog_fs_total_bytes(void)
 static FATFS g_openlog_fatfs;
 static openlog_fs_node_t g_nodes[OPENLOG_FS_MAX_NODES];
 static char g_paths[OPENLOG_FS_MAX_NODES][OPENLOG_FS_PATH_LENGTH + 1U];
+static FIL g_stream_file;
+static uint8_t g_stream_open;
+static uint8_t g_stream_node_id;
+static uint32_t g_stream_offset;
 
 static void openlog_fs_build_fatfs_path(const char *relative_path, char *fatfs_path, size_t length)
 {
@@ -731,8 +788,16 @@ static int8_t openlog_fs_fill_zero_gap(FIL *file, uint32_t from_offset, uint32_t
 
 void openlog_fs_init(void)
 {
+  if(g_stream_open != 0U)
+  {
+    (void)f_close(&g_stream_file);
+  }
+
   memset(g_nodes, 0, sizeof(g_nodes));
   memset(g_paths, 0, sizeof(g_paths));
+  g_stream_open = 0U;
+  g_stream_node_id = OPENLOG_FS_ROOT_ID;
+  g_stream_offset = 0U;
 
   g_nodes[OPENLOG_FS_ROOT_ID].used = 1U;
   g_nodes[OPENLOG_FS_ROOT_ID].is_dir = 1U;
@@ -1175,6 +1240,116 @@ int8_t openlog_fs_truncate(uint8_t node_id, uint32_t size)
 
   (void)f_close(&file);
   return openlog_fs_sync_node_size(node_id);
+}
+
+int8_t openlog_fs_stream_begin(uint8_t node_id, uint32_t offset)
+{
+  FRESULT result;
+  FSIZE_t current_size;
+  char fatfs_path[OPENLOG_FS_PATH_LENGTH + 4U];
+
+  if(!openlog_fs_node_valid(node_id) || g_nodes[node_id].is_dir != 0U)
+  {
+    return -1;
+  }
+
+  if(g_stream_open != 0U)
+  {
+    (void)openlog_fs_stream_end();
+  }
+
+  openlog_fs_build_fatfs_path(g_paths[node_id], fatfs_path, sizeof(fatfs_path));
+  result = f_open(&g_stream_file, fatfs_path, FA_WRITE | FA_OPEN_EXISTING);
+  if(result != FR_OK)
+  {
+    return -1;
+  }
+
+  current_size = f_size(&g_stream_file);
+  if(offset > current_size &&
+     openlog_fs_fill_zero_gap(&g_stream_file, (uint32_t)current_size, offset) != 0)
+  {
+    (void)f_close(&g_stream_file);
+    return -1;
+  }
+
+  if(f_lseek(&g_stream_file, offset) != FR_OK)
+  {
+    (void)f_close(&g_stream_file);
+    return -1;
+  }
+
+  g_stream_open = 1U;
+  g_stream_node_id = node_id;
+  g_stream_offset = offset;
+  return 0;
+}
+
+int8_t openlog_fs_stream_write(const uint8_t *data, uint16_t length)
+{
+  UINT bytes_written;
+  uint32_t end_offset;
+
+  if(g_stream_open == 0U || (length != 0U && data == NULL))
+  {
+    return -1;
+  }
+
+  if(length != 0U &&
+     (f_write(&g_stream_file, data, length, &bytes_written) != FR_OK || bytes_written != length))
+  {
+    return -1;
+  }
+
+  end_offset = g_stream_offset + length;
+  if(end_offset > g_nodes[g_stream_node_id].size)
+  {
+    g_nodes[g_stream_node_id].size = end_offset;
+  }
+  g_stream_offset = end_offset;
+  return 0;
+}
+
+int8_t openlog_fs_stream_sync(void)
+{
+  if(g_stream_open == 0U)
+  {
+    return -1;
+  }
+
+  if(f_sync(&g_stream_file) != FR_OK)
+  {
+    return -1;
+  }
+
+  return openlog_fs_sync_node_size(g_stream_node_id);
+}
+
+int8_t openlog_fs_stream_end(void)
+{
+  uint8_t node_id;
+  int8_t status;
+
+  if(g_stream_open == 0U)
+  {
+    return -1;
+  }
+
+  node_id = g_stream_node_id;
+  status = openlog_fs_stream_sync();
+  if(f_close(&g_stream_file) != FR_OK)
+  {
+    status = -1;
+  }
+
+  g_stream_open = 0U;
+  g_stream_node_id = OPENLOG_FS_ROOT_ID;
+  g_stream_offset = 0U;
+  if(status == 0)
+  {
+    status = openlog_fs_sync_node_size(node_id);
+  }
+  return status;
 }
 
 const uint8_t *openlog_fs_data(uint8_t node_id)

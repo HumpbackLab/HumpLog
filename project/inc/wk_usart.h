@@ -63,6 +63,9 @@ extern "C" {
 
   uint8_t wk_usart1_readable(void);
   uint8_t wk_usart1_read_byte(void);
+  void wk_usart1_discard_rx(void);
+  uint32_t wk_usart1_rx_overrun_bytes(void);
+  void wk_usart1_rx_overrun_clear(void);
   void wk_usart1_write_byte(uint8_t byte);
   void wk_usart1_write_buffer(const uint8_t *data, uint32_t length);
   void wk_usart1_write_string(const char *text);

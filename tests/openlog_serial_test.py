@@ -55,6 +55,8 @@ class OpenLogPort:
         if baud not in BAUD_MAP:
             raise ValueError(f"unsupported baud: {baud}")
 
+        self.device = device
+        self.baud = baud
         self.fd = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         self.timeout = timeout
         attrs = termios.tcgetattr(self.fd)
@@ -71,6 +73,12 @@ class OpenLogPort:
 
     def close(self) -> None:
         os.close(self.fd)
+        self.fd = -1
+
+    def reopen(self, baud: int) -> None:
+        if self.fd >= 0:
+            self.close()
+        self.__init__(self.device, baud, self.timeout)
 
     def write(self, data: bytes) -> None:
         view = memoryview(data)
@@ -168,6 +176,19 @@ def cleanup_dir(port: OpenLogPort, name: str) -> None:
     port.command(f"rm -rf {name}")
 
 
+def switch_baud(port: OpenLogPort, baud: int, settle_s: float = 0.5) -> bytes:
+    if baud not in BAUD_MAP:
+        raise ValueError(f"unsupported baud: {baud}")
+
+    port.write(f"baud {baud}\r".encode("ascii"))
+    pre_switch = port.read_until_idle(idle_s=0.2, overall_s=max(1.0, port.timeout))
+    time.sleep(settle_s)
+    port.reopen(baud)
+    sync_response = port.sync_command_mode()
+    expect(PROMPT in sync_response, f"failed to synchronize after switching to {baud}")
+    return pre_switch + sync_response
+
+
 def test_basic_commands(port: OpenLogPort) -> None:
     disk_response = port.command("disk")
     expect(b"MID:" in disk_response or b"disk info unavailable" in disk_response,
@@ -239,9 +260,9 @@ def run_stress_test(port: OpenLogPort, total_bytes: int, chunk_bytes: int) -> St
     remaining = total_bytes
     start = time.perf_counter()
     while remaining > 0:
-      current = chunk if remaining >= len(chunk) else chunk[:remaining]
-      port.write(current)
-      remaining -= len(current)
+        current = chunk if remaining >= len(chunk) else chunk[:remaining]
+        port.write(current)
+        remaining -= len(current)
     port.write(ESCAPE)
     exit_response = port.read_until_idle(
         idle_s=0.5,
