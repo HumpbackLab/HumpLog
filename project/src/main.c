@@ -26,6 +26,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "at32f421_wk_config.h"
+#include "board_led.h"
 #include "openlog.h"
 #include "wk_spi.h"
 #include "wk_usart.h"
@@ -58,38 +59,11 @@
 
 /* private function prototypes --------------------------------------------*/
 /* add user code begin function prototypes */
-static void board_status_led_init(void);
-static void board_status_led_set(uint8_t on);
 
 /* add user code end function prototypes */
 
 /* private user code ---------------------------------------------------------*/
 /* add user code begin 0 */
-static void board_status_led_init(void)
-{
-  gpio_init_type gpio_init_struct;
-
-  gpio_default_para_init(&gpio_init_struct);
-  gpio_init_struct.gpio_drive_strength = GPIO_DRIVE_STRENGTH_MODERATE;
-  gpio_init_struct.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
-  gpio_init_struct.gpio_mode = GPIO_MODE_OUTPUT;
-  gpio_init_struct.gpio_pins = GPIO_PINS_0;
-  gpio_init_struct.gpio_pull = GPIO_PULL_NONE;
-  gpio_init(GPIOB, &gpio_init_struct);
-  board_status_led_set(0U);
-}
-
-static void board_status_led_set(uint8_t on)
-{
-  if(on != 0U)
-  {
-    gpio_bits_reset(GPIOB, GPIO_PINS_0);
-  }
-  else
-  {
-    gpio_bits_set(GPIOB, GPIO_PINS_0);
-  }
-}
 
 /* add user code end 0 */
 
@@ -127,7 +101,7 @@ int main(void)
   /* init spi2 function. */
   wk_spi2_init();
 
-  board_status_led_init();
+  board_led_init();
 
   /* add user code begin 2 */
 
@@ -140,7 +114,7 @@ int main(void)
     /* add user code begin 3 */
 
     openlog_process();
-    board_status_led_set(openlog_record_active());
+    board_led_tick();
 
     /* add user code end 3 */
   }

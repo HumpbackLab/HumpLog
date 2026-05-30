@@ -9,6 +9,7 @@
 - 使用 `config.txt` 保存兼容配置：`baud,escape,esc#,mode,verb,echo,ignoreRX`
 - 使用 `SPI1 + SD SPI + FatFs` 作为存储后端
 - 日志模式带有流式写缓冲，降低逐字节刷盘带来的性能损失
+- 当前实板最高可靠记录速率约为 `52.5 KB/s @ 1000000 baud`（`64KB` 连续写入校验通过）
 
 ## 目录结构
 
@@ -42,7 +43,7 @@ make -B
 - `make -B`：使用 `arm-none-eabi-gcc` 全量重编译固件，生成 `build/openlog.elf/.hex/.bin`
 - 烧录参考命令：
 ```bash
-/home/ncer/at32_openocd/bin/openocd -s /home/ncer/at32_openocd/scripts -f /home/ncer/openlog/openlog/at32f421.cfg -c "program /home/ncer/openlog/openlog/build/openlog.elf verify reset exit
+/home/ncer/at32_openocd/bin/openocd -s /home/ncer/at32_openocd/scripts -f /home/ncer/openlog/openlog/at32f421.cfg -c "program /home/ncer/openlog/openlog/build/openlog.elf verify reset exit"
 ```
 
 ## 兼容性说明

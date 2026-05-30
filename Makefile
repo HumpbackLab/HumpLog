@@ -33,6 +33,7 @@ BUILD_DIR = build
 # C sources
 C_SOURCES = \
 project/src/main.c \
+project/src/board_led.c \
 project/src/openlog.c \
 project/src/openlog_fs.c \
 project/src/sd_spi.c \

@@ -9,3 +9,5 @@ build/
 *.log
 *:Zone.Identifier
 tests/openlog_fs_test
+*.pyc
+.vscode

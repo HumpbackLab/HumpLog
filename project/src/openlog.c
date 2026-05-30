@@ -1,5 +1,6 @@
 #include "openlog.h"
 
+#include "board_led.h"
 #include "openlog_fs.h"
 #include "sd_spi.h"
 #include "wk_system.h"
@@ -12,14 +13,14 @@
 #include <string.h>
 
 #define OPENLOG_ESCAPE_CHAR 0x1AU
-#define OPENLOG_ESCAPE_COUNT 3U
+#define OPENLOG_ESCAPE_COUNT 0U    //default to disable escape mode. enable in config.txt by setting to 3 or higher
 #define OPENLOG_VERSION_BANNER "12"
 #define OPENLOG_PROMPT_RECORD "<"
 #define OPENLOG_PROMPT_COMMAND ">"
 #define OPENLOG_LINE_BUFFER_SIZE 80U
 #define OPENLOG_WRITE_LINE_BUFFER_SIZE 80U
-#define OPENLOG_STREAM_BUFFER_SIZE 768U
-#define OPENLOG_STREAM_BUFFER_COUNT 2U
+#define OPENLOG_STREAM_BUFFER_SIZE 2048U
+#define OPENLOG_STREAM_BUFFER_COUNT 3U
 #define OPENLOG_STREAM_FLUSH_IDLE_US 20000U
 #define OPENLOG_CONFIG_FILE "config.txt"
 
@@ -58,7 +59,9 @@ typedef struct
   uint8_t active_file;
   uint8_t escape_count;
   uint8_t stream_active_index;
+  uint8_t stream_drain_index;
   uint8_t stream_overrun_latched;
+  uint8_t stream_drain;
   uint8_t line_length;
   uint8_t write_line_length;
   uint16_t stream_length[OPENLOG_STREAM_BUFFER_COUNT];
@@ -187,13 +190,13 @@ static void openlog_write_prompt_for_mode(void)
 
 static void openlog_config_set_defaults(void)
 {
-  g_openlog_config.baud_rate = 9600U;
+  g_openlog_config.baud_rate = 115200U;
   g_openlog_config.escape_char = OPENLOG_ESCAPE_CHAR;
   g_openlog_config.escape_count = OPENLOG_ESCAPE_COUNT;
   g_openlog_config.boot_mode = OPENLOG_BOOT_MODE_NEWLOG;
   g_openlog_config.verbose_errors = 1U;
   g_openlog_config.echo_enabled = 1U;
-  g_openlog_config.ignore_rx_on_boot = 0U;
+  g_openlog_config.ignore_rx_on_boot = 1U;
 }
 
 static uint8_t openlog_config_baud_valid(uint32_t baud_rate)
@@ -579,21 +582,29 @@ static uint8_t openlog_stream_flush(void)
   uint32_t sync_elapsed_us;
 
   if((g_openlog.mode != OPENLOG_MODE_NEWLOG && g_openlog.mode != OPENLOG_MODE_APPEND) ||
-     (g_openlog.stream_length[0] == 0U && g_openlog.stream_length[1] == 0U))
+     (g_openlog.stream_length[0] == 0U &&
+      g_openlog.stream_length[1] == 0U &&
+      g_openlog.stream_length[2] == 0U))
   {
     return 1U;
   }
 
-  pending_bytes = (uint32_t)g_openlog.stream_length[0] + (uint32_t)g_openlog.stream_length[1];
+  pending_bytes = (uint32_t)g_openlog.stream_length[0] +
+                  (uint32_t)g_openlog.stream_length[1] +
+                  (uint32_t)g_openlog.stream_length[2];
   start_tick = wk_timebase_raw_tick();
   if(openlog_stream_commit_active() == 0U)
   {
     return 0U;
   }
 
-  if(openlog_stream_flush_pending() == 0U)
+  /* Drain every full buffer in the ring. */
+  while(g_openlog.stream_drain_index != g_openlog.stream_active_index)
   {
-    return 0U;
+    if(openlog_stream_flush_pending() == 0U)
+    {
+      return 0U;
+    }
   }
 
   sync_start_tick = wk_timebase_raw_tick();
@@ -622,20 +633,27 @@ static uint8_t openlog_stream_flush(void)
 
 static uint8_t openlog_stream_flush_pending(void)
 {
-  uint8_t pending_index;
+  uint8_t drain_index;
   uint16_t pending_length;
   uint32_t start_tick;
   uint32_t elapsed_us;
 
-  pending_index = (uint8_t)(g_openlog.stream_active_index ^ 1U);
-  pending_length = g_openlog.stream_length[pending_index];
+  if(g_openlog.stream_drain_index == g_openlog.stream_active_index)
+  {
+    return 1U;  /* ring empty — nothing to drain */
+  }
+
+  drain_index = g_openlog.stream_drain_index;
+  pending_length = g_openlog.stream_length[drain_index];
   if(pending_length == 0U)
   {
+    /* Stale slot — advance drain pointer and let caller retry. */
+    g_openlog.stream_drain_index = (uint8_t)((drain_index + 1U) % OPENLOG_STREAM_BUFFER_COUNT);
     return 1U;
   }
 
   start_tick = wk_timebase_raw_tick();
-  if(openlog_fs_stream_write(g_openlog.stream_buffer[pending_index], pending_length) != 0)
+  if(openlog_fs_stream_write(g_openlog.stream_buffer[drain_index], pending_length) != 0)
   {
     return 0U;
   }
@@ -649,29 +667,32 @@ static uint8_t openlog_stream_flush_pending(void)
     g_openlog_stream_stats.write_max_us = elapsed_us;
   }
   g_openlog.stream_offset += pending_length;
-  g_openlog.stream_length[pending_index] = 0U;
+  g_openlog.stream_length[drain_index] = 0U;
+  g_openlog.stream_drain_index = (uint8_t)((drain_index + 1U) % OPENLOG_STREAM_BUFFER_COUNT);
   return 1U;
 }
 
 static uint8_t openlog_stream_commit_active(void)
 {
-  uint8_t active_index;
-  uint8_t pending_index;
+  uint8_t next_write;
 
-  active_index = g_openlog.stream_active_index;
-  if(g_openlog.stream_length[active_index] == 0U)
+  if(g_openlog.stream_length[g_openlog.stream_active_index] == 0U)
   {
-    return 1U;
+    return 1U;  /* nothing to commit */
   }
 
-  pending_index = (uint8_t)(active_index ^ 1U);
-  if(g_openlog.stream_length[pending_index] != 0U &&
-     openlog_stream_flush_pending() == 0U)
+  next_write = (uint8_t)((g_openlog.stream_active_index + 1U) % OPENLOG_STREAM_BUFFER_COUNT);
+
+  /* Ring full — drain the oldest buffer to free a slot. */
+  if(next_write == g_openlog.stream_drain_index)
   {
-    return 0U;
+    if(openlog_stream_flush_pending() == 0U)
+    {
+      return 0U;
+    }
   }
 
-  g_openlog.stream_active_index = pending_index;
+  g_openlog.stream_active_index = next_write;
   return 1U;
 }
 
@@ -683,8 +704,10 @@ static void openlog_stream_start(uint8_t node_id, openlog_mode_t mode)
   g_openlog.mode = mode;
   g_openlog.escape_count = 0U;
   g_openlog.stream_active_index = 0U;
+  g_openlog.stream_drain_index = 0U;
   g_openlog.stream_length[0] = 0U;
   g_openlog.stream_length[1] = 0U;
+  g_openlog.stream_length[2] = 0U;
   g_openlog.stream_overrun_latched = 0U;
   node = openlog_fs_node_get(node_id);
   g_openlog.stream_offset = node != NULL ? node->size : 0U;
@@ -693,6 +716,11 @@ static void openlog_stream_start(uint8_t node_id, openlog_mode_t mode)
   if(openlog_fs_stream_begin(node_id, g_openlog.stream_offset) != 0)
   {
     g_openlog.mode = OPENLOG_MODE_COMMAND;
+  }
+
+  if(g_openlog.mode == mode)
+  {
+    board_led_on();  /* record mode — solid LED, blink takes over when data flows */
   }
 }
 
@@ -716,6 +744,7 @@ static void openlog_stream_stop(void)
   }
   g_openlog.stream_length[0] = 0U;
   g_openlog.stream_length[1] = 0U;
+  g_openlog.stream_length[2] = 0U;
 }
 
 static uint8_t openlog_stream_queue_byte(uint8_t byte)
@@ -734,6 +763,7 @@ static uint8_t openlog_stream_queue_byte(uint8_t byte)
 
   g_openlog.stream_buffer[active_index][g_openlog.stream_length[active_index]++] = byte;
   g_openlog.stream_last_tick = wk_timebase_raw_tick();
+  board_led_fast_blink();  /* data is flowing — fast blink indicator */
   return 1U;
 }
 
@@ -741,7 +771,15 @@ static void openlog_enter_command_mode(void)
 {
   if(g_openlog.mode == OPENLOG_MODE_NEWLOG || g_openlog.mode == OPENLOG_MODE_APPEND)
   {
-    openlog_stream_stop();
+    /* Commit the active buffer so that in-flight data is preserved
+       in the pending buffer.  Do NOT block on SD-card write or sync
+       here — the main loop will drain the buffers asynchronously
+       so the USART RX path stays responsive. */
+    if(g_openlog.stream_length[g_openlog.stream_active_index] != 0U)
+    {
+      (void)openlog_stream_commit_active();
+    }
+    g_openlog.stream_drain = 1U;
   }
   g_openlog.mode = OPENLOG_MODE_COMMAND;
   g_openlog.escape_count = 0U;
@@ -751,7 +789,31 @@ static void openlog_enter_command_mode(void)
     g_openlog.stream_overrun_latched = 0U;
     openlog_report_error("error: rx overrun");
   }
+  board_led_off();
   openlog_write_prompt_line();
+}
+
+static void openlog_stream_drain_complete(void)
+{
+  if(g_openlog.stream_drain == 0U)
+  {
+    return;
+  }
+
+  /* Drain the ring: commit the current write buffer (if non-empty),
+     then flush every pending buffer to the file system. */
+  (void)openlog_stream_commit_active();
+  while(g_openlog.stream_drain_index != g_openlog.stream_active_index)
+  {
+    if(openlog_stream_flush_pending() == 0U)
+    {
+      break;
+    }
+  }
+
+  (void)openlog_fs_stream_sync();
+  (void)openlog_fs_stream_end();
+  g_openlog.stream_drain = 0U;
 }
 
 static void openlog_reset_runtime_state(void)
@@ -760,11 +822,14 @@ static void openlog_reset_runtime_state(void)
   g_openlog.active_file = openlog_fs_root();
   g_openlog.escape_count = 0U;
   g_openlog.stream_active_index = 0U;
+  g_openlog.stream_drain_index = 0U;
   g_openlog.stream_overrun_latched = 0U;
+  g_openlog.stream_drain = 0U;
   g_openlog.line_length = 0U;
   g_openlog.write_line_length = 0U;
   g_openlog.stream_length[0] = 0U;
   g_openlog.stream_length[1] = 0U;
+  g_openlog.stream_length[2] = 0U;
   g_openlog.ignore_lf = 0U;
   g_openlog.write_ignore_lf = 0U;
   g_openlog.write_offset = 0U;
@@ -1354,6 +1419,11 @@ static void openlog_process_command(char *line)
   arg3 = openlog_next_token(&cursor);
   arg4 = openlog_next_token(&cursor);
 
+  /* Finish any pending async drain before serving the command so
+     that size / read / cat see accurate file state and a new
+     append / new / write starts from a clean fs stream. */
+  openlog_stream_drain_complete();
+
   if(openlog_text_equal(command, "?"))
   {
     openlog_print_help();
@@ -1897,13 +1967,39 @@ void openlog_process(void)
   }
 
   if((g_openlog.mode == OPENLOG_MODE_NEWLOG || g_openlog.mode == OPENLOG_MODE_APPEND) &&
-     (g_openlog.stream_length[0] != 0U || g_openlog.stream_length[1] != 0U) &&
+     (g_openlog.stream_length[0] != 0U || g_openlog.stream_length[1] != 0U || g_openlog.stream_length[2] != 0U) &&
      wk_timebase_elapsed_us(g_openlog.stream_last_tick) >= OPENLOG_STREAM_FLUSH_IDLE_US)
   {
     if(openlog_stream_flush() == 0U)
     {
       openlog_report_error("error: storage full");
       openlog_enter_command_mode();
+    }
+    else
+    {
+      board_led_on();  /* idle → solid LED until data resumes */
+    }
+  }
+
+  /* Async stream drain — keep flushing pending buffers after ESCAPE
+     has already returned the command prompt.  The fs stream stays open
+     until every byte has been written and synced. */
+  if(g_openlog.stream_drain != 0U)
+  {
+    if(g_openlog.stream_length[0] != 0U || g_openlog.stream_length[1] != 0U || g_openlog.stream_length[2] != 0U)
+    {
+      if(openlog_stream_flush_pending() == 0U)
+      {
+        openlog_report_error("error: storage full");
+        g_openlog.stream_drain = 0U;
+        (void)openlog_fs_stream_end();
+      }
+    }
+    else
+    {
+      (void)openlog_fs_stream_sync();
+      (void)openlog_fs_stream_end();
+      g_openlog.stream_drain = 0U;
     }
   }
 }
