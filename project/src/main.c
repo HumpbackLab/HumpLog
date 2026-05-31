@@ -27,7 +27,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "at32f421_wk_config.h"
 #include "board_led.h"
-#include "openlog.h"
+#include "humplog.h"
 #include "wk_spi.h"
 #include "wk_usart.h"
 #include "wk_system.h"
@@ -105,7 +105,7 @@ int main(void)
 
   /* add user code begin 2 */
 
-  openlog_init();
+  humplog_init();
 
   /* add user code end 2 */
 
@@ -113,7 +113,7 @@ int main(void)
   {
     /* add user code begin 3 */
 
-    openlog_process();
+    humplog_process();
     board_led_tick();
 
     /* add user code end 3 */

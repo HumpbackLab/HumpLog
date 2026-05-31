@@ -99,8 +99,8 @@
         <PinSub pinname="PB5" signalname="SPI2_MOSI" signaltype="2"/>
     </PINInfo>
     <ProjectInfomation>
-        <ProjectName>openlog</ProjectName>
-        <ProjectLocation>//wsl.localhost/Ubuntu-22.04/home/ncer/openlog</ProjectLocation>
+        <ProjectName>humplog</ProjectName>
+        <ProjectLocation>//wsl.localhost/Ubuntu-22.04/home/ncer/humplog</ProjectLocation>
         <ToolchainIDE>Makefile</ToolchainIDE>
         <ARMCompiler>0</ARMCompiler>
         <BackupCode>true</BackupCode>

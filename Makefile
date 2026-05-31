@@ -9,7 +9,7 @@
 ######################################
 # target
 ######################################
-TARGET = openlog
+TARGET = humplog
 
 
 ######################################
@@ -34,8 +34,8 @@ BUILD_DIR = build
 C_SOURCES = \
 project/src/main.c \
 project/src/board_led.c \
-project/src/openlog.c \
-project/src/openlog_fs.c \
+project/src/humplog.c \
+project/src/humplog_fs.c \
 project/src/sd_spi.c \
 project/src/diskio.c \
 project/src/syscalls.c \
@@ -201,11 +201,11 @@ $(BUILD_DIR):
 clean:
 	-rm -fR $(BUILD_DIR)
 
-host-test: tests/openlog_fs_test
-	./tests/openlog_fs_test
+host-test: tests/humplog_fs_test
+	./tests/humplog_fs_test
 
-tests/openlog_fs_test: tests/openlog_fs_test.c project/src/openlog_fs.c project/inc/openlog_fs.h
-	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -DOPENLOG_FS_USE_RAMDISK_TEST -Iproject/inc tests/openlog_fs_test.c project/src/openlog_fs.c -o $@
+tests/humplog_fs_test: tests/humplog_fs_test.c project/src/humplog_fs.c project/inc/humplog_fs.h
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -DHUMPLOG_FS_USE_RAMDISK_TEST -Iproject/inc tests/humplog_fs_test.c project/src/humplog_fs.c -o $@
   
 #######################################
 # dependencies

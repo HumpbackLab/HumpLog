@@ -8,6 +8,6 @@ build/
 *.map
 *.log
 *:Zone.Identifier
-tests/openlog_fs_test
+tests/humplog_fs_test
 *.pyc
 .vscode

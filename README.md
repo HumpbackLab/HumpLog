@@ -1,6 +1,6 @@
 # HumpLog
 
-这是由HumpbackLab推出的 OpenLog 兼容固件工程，目标是兼容旧设备对 SparkFun OpenLog 的串口使用方式，基于串口记录log至SPI SD卡中，
+这是由HumpbackLab推出的 Humplog 兼容固件工程，目标是兼容旧设备对 SparkFun OpenLog 的串口使用方式，基于串口记录log至SPI SD卡中，
 同时支持更高波特率(1M)和更高吞吐率。
 
 ## 当前能力
@@ -16,7 +16,7 @@
 
 - `project/src/`：主固件源码
 - `project/inc/`：工程头文件
-- `tests/`：主机侧测试，当前主要覆盖 `openlog_fs`
+- `tests/`：主机侧测试，当前主要覆盖 `humplog_fs`
 - `third_party/FatFs/`：FatFs 子模块
 - `libraries/`：AT32 CMSIS 与外设驱动
 
@@ -72,12 +72,9 @@ make host-test
 make -B
 ```
 
-- `make host-test`：使用本机 `gcc` 编译并运行 `openlog_fs` 主机测试
-- `make -B`：使用 `arm-none-eabi-gcc` 全量重编译固件，生成 `build/openlog.elf/.hex/.bin`
-- 烧录参考命令：
-```bash
-/home/ncer/at32_openocd/bin/openocd -s /home/ncer/at32_openocd/scripts -f /home/ncer/openlog/openlog/at32f421.cfg -c "program /home/ncer/openlog/openlog/build/openlog.elf verify reset exit"
-```
+- `make host-test`：使用本机 `gcc` 编译并运行 `humplog_fs` 主机测试
+- `make -B`：使用 `arm-none-eabi-gcc` 全量重编译固件，生成 `build/humplog.elf/.hex/.bin`
+
 
 ## 兼容性说明
 

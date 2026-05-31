@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenLog serial test tool for the AT32 firmware.
+"""Humplog serial test tool for the AT32 firmware.
 
 This script uses only the Python standard library and is intended for Linux
 hosts with a USB-to-TTL adapter exposed as /dev/ttyUSB*.
@@ -50,7 +50,7 @@ class StressResult:
     bytes_per_s: float
 
 
-class OpenLogPort:
+class HumplogPort:
     def __init__(self, device: str, baud: int, timeout: float) -> None:
         if baud not in BAUD_MAP:
             raise ValueError(f"unsupported baud: {baud}")
@@ -168,15 +168,15 @@ def parse_size(response: bytes) -> int:
     return int(match.group(1))
 
 
-def cleanup_file(port: OpenLogPort, name: str) -> None:
+def cleanup_file(port: HumplogPort, name: str) -> None:
     port.command(f"rm {name}")
 
 
-def cleanup_dir(port: OpenLogPort, name: str) -> None:
+def cleanup_dir(port: HumplogPort, name: str) -> None:
     port.command(f"rm -rf {name}")
 
 
-def switch_baud(port: OpenLogPort, baud: int, settle_s: float = 0.5) -> bytes:
+def switch_baud(port: HumplogPort, baud: int, settle_s: float = 0.5) -> bytes:
     if baud not in BAUD_MAP:
         raise ValueError(f"unsupported baud: {baud}")
 
@@ -189,7 +189,7 @@ def switch_baud(port: OpenLogPort, baud: int, settle_s: float = 0.5) -> bytes:
     return pre_switch + sync_response
 
 
-def test_basic_commands(port: OpenLogPort) -> None:
+def test_basic_commands(port: HumplogPort) -> None:
     disk_response = port.command("disk")
     expect(b"MID:" in disk_response or b"disk info unavailable" in disk_response,
            "disk command returned unexpected output")
@@ -198,9 +198,9 @@ def test_basic_commands(port: OpenLogPort) -> None:
     expect(PROMPT in ls_response, "ls did not return a prompt")
 
 
-def test_append_and_read(port: OpenLogPort) -> None:
+def test_append_and_read(port: HumplogPort) -> None:
     filename = "BASIC.TXT"
-    payload = b"hello-openlog\nsecond-line\n"
+    payload = b"hello-humplog\nsecond-line\n"
 
     cleanup_file(port, filename)
     port.mode_command(f"append {filename}")
@@ -215,7 +215,7 @@ def test_append_and_read(port: OpenLogPort) -> None:
     expect(payload in read_response, "append readback mismatch")
 
 
-def test_write_mode(port: OpenLogPort) -> None:
+def test_write_mode(port: HumplogPort) -> None:
     filename = "WRITE.TXT"
     expected = b"alpha\nbeta\n"
 
@@ -232,7 +232,7 @@ def test_write_mode(port: OpenLogPort) -> None:
     expect(expected in read_response, "write mode readback mismatch")
 
 
-def test_directory_ops(port: OpenLogPort) -> None:
+def test_directory_ops(port: HumplogPort) -> None:
     dirname = "TDIR"
 
     cleanup_dir(port, dirname)
@@ -250,7 +250,7 @@ def test_directory_ops(port: OpenLogPort) -> None:
            "directory was not removed")
 
 
-def run_stress_test(port: OpenLogPort, total_bytes: int, chunk_bytes: int) -> StressResult:
+def run_stress_test(port: HumplogPort, total_bytes: int, chunk_bytes: int) -> StressResult:
     filename = "STRESS.BIN"
     chunk = (b"0123456789ABCDEF" * ((chunk_bytes + 15) // 16))[:chunk_bytes]
 
@@ -279,7 +279,7 @@ def run_stress_test(port: OpenLogPort, total_bytes: int, chunk_bytes: int) -> St
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="OpenLog serial protocol test tool")
+    parser = argparse.ArgumentParser(description="Humplog serial protocol test tool")
     parser.add_argument("--port", default="/dev/ttyUSB0", help="serial device path")
     parser.add_argument("--baud", type=int, default=9600, help="serial baud rate")
     parser.add_argument("--timeout", type=float, default=3.0, help="serial timeout in seconds")
@@ -291,7 +291,7 @@ def main() -> int:
                         help="single write chunk size in bytes")
     args = parser.parse_args()
 
-    port = OpenLogPort(args.port, args.baud, args.timeout)
+    port = HumplogPort(args.port, args.baud, args.timeout)
     try:
         print(f"[INFO] probing {args.port} @ {args.baud} baud")
         sync_response = port.sync_command_mode()

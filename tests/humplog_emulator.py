@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Minimal OpenLog serial emulator for flight-controller integration testing.
+"""Minimal Humplog serial emulator for flight-controller integration testing.
 
 This tool opens a real serial port, responds to a practical subset of the
-OpenLog command protocol, and logs everything the flight controller sends.
+Humplog command protocol, and logs everything the flight controller sends.
 Only the Python standard library is used.
 """
 
@@ -182,7 +182,7 @@ class EmulatorState:
     pending_baud: int | None
 
 
-class OpenLogEmulator:
+class HumplogEmulator:
     def __init__(self, port: SerialPort, logger: SessionLogger, boot_mode: str) -> None:
         self.port = port
         self.logger = logger
@@ -455,14 +455,14 @@ class OpenLogEmulator:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="OpenLog serial emulator")
+    parser = argparse.ArgumentParser(description="Humplog serial emulator")
     parser.add_argument("--port", required=True, help="serial device path, for example /dev/ttyUSB0")
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD, help="initial baud rate")
     parser.add_argument(
         "--boot-mode",
         choices=("command", "record"),
         default="record",
-        help="initial prompt mode; record matches original OpenLog default boot behavior",
+        help="initial prompt mode; record matches original Humplog default boot behavior",
     )
     parser.add_argument(
         "--output-dir",
@@ -478,9 +478,9 @@ def main() -> int:
     output_dir = Path(args.output_dir) if args.output_dir else Path("tests/emulator_logs") / timestamp
     port = SerialPort(args.port, args.baud)
     logger = SessionLogger(output_dir)
-    emulator = OpenLogEmulator(port, logger, args.boot_mode)
+    emulator = HumplogEmulator(port, logger, args.boot_mode)
     try:
-        print(f"[INFO] emulating OpenLog on {args.port} @ {args.baud}")
+        print(f"[INFO] emulating Humplog on {args.port} @ {args.baud}")
         print(f"[INFO] logs: {output_dir}")
         return emulator.run()
     finally:
