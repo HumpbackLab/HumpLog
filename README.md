@@ -81,3 +81,11 @@ make -B
 当前文件系统路径缓存上限为 `32B`，因此更适合将日志文件直接放在根目录，或仅使用很浅的目录层级；如果目录路径过深，可能导致路径缓存失败。
 
 当前文件系统最多支持`64`个节点。当节点数超过该数量之后，会影响命令模式下的`ls`、`new`等命令的返回结果，但不会影响NewLog模式下的记录。
+
+## 开源许可
+
+本项目采用 **GNU General Public License v3.0 (GPLv3)** 开源许可。详见 [LICENSE](LICENSE) 文件。
+
+本项目源码（`project/src/` 和 `project/inc/` 中的 Humplog 原创部分，以及 `tests/` 目录）均受 GPLv3 保护。
+`libraries/` 目录下的 AT32 CMSIS/驱动代码遵循 Artery Technology 的 BSP 许可条款。
+`third_party/FatFs/` 子模块遵循其自有许可。如果闭源项目中使用了该项目的代码, 请确保遵循GPLV3的开源协议。
