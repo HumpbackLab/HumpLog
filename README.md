@@ -1,5 +1,7 @@
 # HumpLog
 
+[English](README_EN.md)
+
 这是由HumpbackLab推出的 Humplog 兼容固件工程，目标是兼容旧设备对 SparkFun OpenLog 的串口使用方式，基于串口记录log至SPI SD卡中，
 同时支持更高波特率(1M)和更高吞吐率。
 
